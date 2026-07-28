@@ -1,0 +1,13 @@
+node_modules
+.DS_Store
+.env
+.env.*
+!.env.example
+evm/out
+evm/cache
+evm/broadcast
+evm/lib/
+evm/.anvil-session.env
+evm/.env.*
+!evm/.env.anvil.example
+web/.env

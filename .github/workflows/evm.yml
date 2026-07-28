@@ -1,0 +1,44 @@
+name: EVM
+
+on:
+  push:
+    paths:
+      - "evm/**"
+      - "Makefile"
+      - ".github/workflows/evm.yml"
+  pull_request:
+    paths:
+      - "evm/**"
+      - "Makefile"
+      - ".github/workflows/evm.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: evm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # Pin to match local forge fmt (stable CI was 1.7.x with different wrapping).
+          version: v1.4.1
+
+      # Matches Makefile `evm-deps`: forge-std, OZ, uniswap-hooks, v4-core, v4-periphery.
+      - name: Install dependencies
+        working-directory: ${{ github.workspace }}
+        run: make evm-deps
+
+      - name: Build
+        run: forge build
+
+      - name: Test
+        run: forge test -vvv
+
+      - name: Format check
+        run: forge fmt --check

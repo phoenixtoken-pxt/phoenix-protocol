@@ -1,0 +1,76 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+# Uniswap v4-core pins pragma solidity 0.8.26 - keep default here for hooks/LP.
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+# Prefer size: FeeCollector must stay under EIP-170 (24576). runs=1 minimizes size.
+optimizer_runs = 1
+via_ir = true
+remappings = [    
+    "@openzeppelin/uniswap-hooks/=lib/uniswap-hooks/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+    "@uniswap/v4-core/=lib/v4-core/",
+    "@uniswap/v4-periphery/=lib/v4-periphery/",
+]
+fs_permissions = [
+    { access = "read-write", path = "./" },
+]
+
+# Token-only deploy/verify: Solc ≥0.8.36 clears Basescan compiler-bug advisories.
+# v4-core cannot compile on this profile - skip hook/LP sources.
+[profile.token]
+src = "src"
+out = "out-token"
+libs = ["lib"]
+solc_version = "0.8.36"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 80
+via_ir = true
+skip = [
+    "src/return-delta/**",
+    "src/fee/**",
+    "src/uniswap/**",
+    "test/**",
+    "script/Bootstrap*",
+    "script/Swap*",
+    "script/Collect*",
+    "script/Execute*",
+    "script/Status*",
+    "script/LocalDemo*",
+    "script/Lock*",
+    "script/OpenTrading*",
+    "script/PhoenixAntiBotOpenSell*",
+]
+remappings = [
+    "@openzeppelin/uniswap-hooks/=lib/uniswap-hooks/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+    "@uniswap/v4-core/=lib/v4-core/",
+    "@uniswap/v4-periphery/=lib/v4-periphery/",
+]
+
+[lint]
+# Keep build output clean: Uniswap/OZ use camelCase public immutables; style notes are noise.
+exclude_lints = [
+    "erc20-unchecked-transfer",
+    "screaming-snake-case-immutable",
+    "screaming-snake-case-const",
+]
+ignore = ["lib/**"]
+
+[invariant]
+runs = 64
+depth = 20
+fail_on_revert = true
+
+[rpc_endpoints]
+anvil = "http://127.0.0.1:8545"
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+[etherscan]
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api.etherscan.io/v2/api?chainid=84532", chain = 84532 }

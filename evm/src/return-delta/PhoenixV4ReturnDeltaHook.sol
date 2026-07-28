@@ -1,0 +1,593 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {SignedMath} from "@openzeppelin/contracts/utils/math/SignedMath.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BeforeSwapDelta, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
+import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
+
+import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
+import {Pxt} from "../core/Pxt.sol";
+import {IPxtSellControls, PxtSellAccess} from "../core/PxtSellAccess.sol";
+import {PhoenixFeeCollector} from "../fee/PhoenixFeeCollector.sol";
+import {ISellAttributor} from "./ISellAttributor.sol";
+import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeModel.sol";
+
+// Uniswap v4 return-delta hook for the official PXT/USDC pool.
+//
+// Overview
+// Fees are taken by adjusting swap deltas (not via the pool's LP fee). Buy, sell, and dump-penalty
+// legs are skimmed in USDC; sells also burn a fixed 1.85% of PXT input. Skimmed USDC is forwarded
+// to PhoenixFeeCollector for deferred `collect` / cash `executeBuyback`. FeeCollector buybacks
+// skip the buy skim (`sender == feeCollector`) so recycled PXT is not taxed twice.
+//
+// Trading gate
+// Swaps require sell unlock + anti-bot clear (`PhoenixAntiBotOpenSell` after unlock).
+// Liquidity: allowlisted providers only while sells are locked; permissionless after unlock.
+//
+// Dump window
+// Large sells take a pessimistic USDC skim up front. The authentic seller reclaiming via
+// `Pxt.attributeSell` gets a rebate to the fair fee; unclaimed skims finalize as orphan fees.
+//
+// Same-tx safety
+// While an ERC-20 sell skim is pending in transient storage, further swaps are blocked and
+// `finalizeOrphanedSell` is refused during unlock so a multi-swap router cannot deny the rebate.
+contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttributor {
+    using SafeERC20 for IERC20;
+    using SafeCast for uint256;
+    using PoolIdLibrary for PoolKey;
+    using TransientStateLibrary for IPoolManager;
+
+    struct SellWindow {
+        uint64 windowStart;
+        uint256 soldInWindow;
+        uint256 balanceAtWindowStart;
+    }
+
+    Pxt public immutable pxt;
+    Currency public immutable pxtCurrency;
+
+    PhoenixFeeCollector public feeCollector;
+
+    PoolId public officialPoolId;
+    bool public officialPoolSet;
+
+    /// @notice May add liquidity while sells are still locked (PoolManager `sender`).
+    mapping(address => bool) public liquidityProvider;
+
+    mapping(address => SellWindow) public sellWindows;
+
+    // Transient pending sell (same-tx ERC-20 attributeSell) via EIP-1153.
+    bytes32 private constant _T_PXT_IN = keccak256("phoenix.rd.pending.pxtIn");
+    bytes32 private constant _T_USDC_OUT = keccak256("phoenix.rd.pending.usdcOut");
+    bytes32 private constant _T_USDC_SKIM = keccak256("phoenix.rd.pending.usdcSkim");
+    bytes32 private constant _T_QUOTE = keccak256("phoenix.rd.pending.quote");
+
+    /// @notice Persistent skim awaiting attributeSell or finalizeOrphanedSell (ERC-6909).
+    struct OrphanSkim {
+        uint128 pxtIn;
+        uint128 usdcOut;
+        uint128 usdcSkim;
+        address quote;
+    }
+
+    OrphanSkim public orphanSkim;
+
+    event OfficialPoolSet(PoolId indexed poolId);
+    event FeeCollectorSet(address indexed collector);
+    event LiquidityProviderSet(address indexed account, bool allowed);
+    event HookFeeCharged(address indexed trader, FeeKind kind, uint256 feeBps, uint256 feeAmount);
+    event SellAttributed(address indexed seller, uint256 pxtAmount, uint256 fairFeeBps, uint256 usdcRefunded);
+    event OrphanSellFinalized(uint256 usdcSkim, uint256 donation, uint256 marketing, uint256 buyback);
+
+    error InvalidPool();
+    error ZeroAmount();
+    error OfficialPoolAlreadySet();
+    error OfficialPoolNotSet();
+    error OnlyPxt();
+    error PendingSellMismatch();
+    /// @dev Transient sell skim still awaiting attributeSell (or unlock still open after a claim sell).
+    error PendingSellOpen();
+    error FeeCollectorNotSet();
+    error LiquidityNotAllowed();
+
+    constructor(IPoolManager manager_, Pxt pxt_, address, address admin) BaseHook(manager_) Ownable(admin) {
+        if (address(pxt_) == address(0) || admin == address(0)) revert ZeroAddress();
+        pxt = pxt_;
+        pxtCurrency = Currency.wrap(address(pxt_));
+        liquidityProvider[admin] = true;
+        emit LiquidityProviderSet(admin, true);
+    }
+
+    function setFeeCollector(PhoenixFeeCollector collector_) external onlyOwner {
+        if (address(collector_) == address(0)) revert ZeroAddress();
+        feeCollector = collector_;
+        liquidityProvider[address(collector_)] = true;
+        emit FeeCollectorSet(address(collector_));
+        emit LiquidityProviderSet(address(collector_), true);
+    }
+
+    function setLiquidityProvider(address account, bool allowed) external onlyOwner {
+        if (account == address(0)) revert ZeroAddress();
+        liquidityProvider[account] = allowed;
+        emit LiquidityProviderSet(account, allowed);
+    }
+
+    function setOfficialPool(PoolKey calldata key) external onlyOwner {
+        if (officialPoolSet) revert OfficialPoolAlreadySet();
+        if (!_poolContainsPxt(key)) revert InvalidPool();
+        officialPoolId = key.toId();
+        officialPoolSet = true;
+        emit OfficialPoolSet(officialPoolId);
+    }
+
+    function sellProtectionCleared() external view returns (bool) {
+        return pxt.sellProtectionCleared();
+    }
+
+    function antiBotSeller() external view returns (address) {
+        return pxt.antiBotSeller();
+    }
+
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: true,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: true,
+            afterSwap: true,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: true,
+            afterSwapReturnDelta: true,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
+    }
+
+    function flags() public pure returns (uint160) {
+        return uint160(
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+        );
+    }
+
+    /// @dev During sell lock only `liquidityProvider[sender]` may add LP. After unlock, anyone may.
+    function _beforeAddLiquidity(
+        address sender,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata params,
+        bytes calldata
+    ) internal view override returns (bytes4) {
+        _enforceOfficialPool(key);
+        if (params.liquidityDelta > 0 && block.timestamp < pxt.sellUnlockTimestamp()) {
+            if (!liquidityProvider[sender]) revert LiquidityNotAllowed();
+        }
+        return this.beforeAddLiquidity.selector;
+    }
+
+    function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
+        internal
+        override
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        _enforceOfficialPool(key);
+        // Do not start another swap while a same-tx sell skim awaits attributeSell.
+        if (_tload(_T_PXT_IN) != 0) revert PendingSellOpen();
+        // Cross-tx ERC-6909 orphan (transient cleared at prior tx end) — finalize at penalty.
+        if (orphanSkim.usdcSkim > 0) {
+            finalizeOrphanedSell();
+        }
+        (bool isBuy, bool isSell) = _classifySwap(key, params);
+
+        if (isSell) return _beforeSell(key, params);
+        if (isBuy) return _beforeBuy(sender, key, params);
+        return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+    }
+
+    function _afterSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata
+    ) internal override returns (bytes4, int128) {
+        _enforceOfficialPool(key);
+        (bool isBuy, bool isSell) = _classifySwap(key, params);
+
+        if (isSell) return _afterSell(key, params, delta);
+        if (isBuy) return _afterBuy(sender, key, params, delta);
+        return (BaseHook.afterSwap.selector, 0);
+    }
+
+    /// @inheritdoc ISellAttributor
+    function attributeSell(address seller, uint256 pxtAmount) external {
+        if (msg.sender != address(pxt)) revert OnlyPxt();
+        uint256 pendingPxt = _tload(_T_PXT_IN);
+        // LP / non-swap settlements also hit PoolManager; ignore when no pending swap skim.
+        if (pendingPxt == 0) return;
+        if (pxtAmount != pendingPxt) revert PendingSellMismatch();
+
+        uint256 usdcOut = _tload(_T_USDC_OUT);
+        uint256 skimmed = _tload(_T_USDC_SKIM);
+        address quoteAddr = address(uint160(_tload(_T_QUOTE)));
+
+        _clearPendingSkim();
+
+        // balanceAfter settlement + sold amount = pre-sell balance.
+        uint256 balanceBefore = pxt.balanceOf(seller) + pxtAmount;
+        uint256 fairBps = _fairSellFeeBps(seller, pxtAmount, balanceBefore);
+        _applySellWindow(seller, pxtAmount, balanceBefore);
+
+        uint256 refund;
+        if (fairBps == 0) {
+            refund = skimmed;
+        } else if (fairBps == PxtFeeModel.SELL_FEE_BPS && usdcOut > 0) {
+            (uint256 dPen, uint256 mPen, uint256 bPen) = PxtFeeModel.splitSellUsdc(PxtFeeModel.PENALTY_FEE_BPS, usdcOut);
+            (uint256 dSell, uint256 mSell, uint256 bSell) = PxtFeeModel.splitSellUsdc(PxtFeeModel.SELL_FEE_BPS, usdcOut);
+            uint256 fairSkim = dSell + mSell + bSell;
+            uint256 penSkim = dPen + mPen + bPen;
+            if (penSkim > fairSkim) refund = penSkim - fairSkim;
+            if (refund > skimmed) refund = skimmed;
+        }
+
+        if (refund > 0 && quoteAddr != address(0)) {
+            IERC20(quoteAddr).safeTransfer(seller, refund);
+        }
+
+        uint256 keep = skimmed - refund;
+        if (keep > 0 && quoteAddr != address(0)) {
+            uint256 feeBps = fairBps == 0 ? PxtFeeModel.SELL_FEE_BPS : fairBps;
+            (uint256 donation, uint256 marketing, uint256 buyback) = PxtFeeModel.splitSellUsdc(feeBps, usdcOut);
+            uint256 target = donation + marketing + buyback;
+            // Rounding: distribute `keep` (may be 1 wei off vs target).
+            if (target > 0 && keep != target) {
+                donation = (keep * donation) / target;
+                marketing = (keep * marketing) / target;
+                buyback = keep - donation - marketing;
+            } else if (target == 0) {
+                buyback = keep;
+            }
+            FeeKind kind = fairBps == PxtFeeModel.PENALTY_FEE_BPS ? FeeKind.Penalty : FeeKind.Sell;
+            _accrueUsdc(Currency.wrap(quoteAddr), kind, donation, marketing, buyback);
+        }
+
+        emit SellAttributed(seller, pxtAmount, fairBps, refund);
+    }
+
+    /// @notice Accrue orphaned sell skim at penalty rates when ERC-20 attributeSell never ran (ERC-6909).
+    /// @dev Safe vs collect/buyback: USDC stays on the hook until this or attributeSell finalizes.
+    /// While PoolManager is unlocked and transient pending is set, refuse finalize so a router
+    /// cannot deny an in-flight ERC-20 rebate. After unlock ends, finalize is allowed
+    /// even if transient is still set (same-tx claim settle left no attributeSell).
+    function finalizeOrphanedSell() public {
+        if (poolManager.isUnlocked() && _tload(_T_PXT_IN) != 0) revert PendingSellOpen();
+
+        OrphanSkim memory o = orphanSkim;
+        if (o.usdcSkim == 0) return;
+
+        _clearPendingSkim();
+
+        address quoteAddr = o.quote;
+        uint256 skimmed = o.usdcSkim;
+        uint256 usdcOut = o.usdcOut;
+        if (skimmed == 0 || quoteAddr == address(0)) return;
+
+        (uint256 donation, uint256 marketing, uint256 buyback) =
+            PxtFeeModel.splitSellUsdc(PxtFeeModel.PENALTY_FEE_BPS, usdcOut);
+        uint256 target = donation + marketing + buyback;
+        if (target > 0 && skimmed != target) {
+            donation = (skimmed * donation) / target;
+            marketing = (skimmed * marketing) / target;
+            buyback = skimmed - donation - marketing;
+        } else if (target == 0) {
+            buyback = skimmed;
+        }
+
+        _accrueUsdc(Currency.wrap(quoteAddr), FeeKind.Penalty, donation, marketing, buyback);
+        emit OrphanSellFinalized(skimmed, donation, marketing, buyback);
+    }
+
+    function _beforeSell(PoolKey calldata key, SwapParams calldata params)
+        internal
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        // Time unlock + anti-bot cleared: blocks ERC-6909 before clearSellProtection.
+        PxtSellAccess.enforceTradingOpen(IPxtSellControls(address(pxt)));
+
+        // Exact-in: burn fixed 1.85% of PXT (same for sell and penalty).
+        if (_pxtIsSpecified(key, params)) {
+            uint256 pxtAmount = SignedMath.abs(params.amountSpecified);
+            if (pxtAmount == 0) revert ZeroAmount();
+            uint256 burnAmount = PxtFeeModel.splitSellBurn(PxtFeeModel.SELL_FEE_BPS, pxtAmount);
+            if (burnAmount == 0) {
+                return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+            }
+            poolManager.take(pxtCurrency, address(this), burnAmount);
+            pxt.burnBalance(burnAmount);
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(burnAmount.toInt128(), 0), 0);
+        }
+
+        // Exact-out: pessimistic USDC skim from specified output at penalty rates.
+        uint256 usdcAmount = SignedMath.abs(params.amountSpecified);
+        if (usdcAmount == 0) revert ZeroAmount();
+        (uint256 donation, uint256 marketing, uint256 buyback) =
+            PxtFeeModel.splitSellUsdc(PxtFeeModel.PENALTY_FEE_BPS, usdcAmount);
+        uint256 usdcFee = donation + marketing + buyback;
+        if (usdcFee == 0) {
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+        }
+        Currency quote = _quoteCurrency(key);
+        poolManager.take(quote, address(this), usdcFee);
+        _tstore(_T_USDC_OUT, usdcAmount);
+        _tstore(_T_USDC_SKIM, usdcFee);
+        _tstore(_T_QUOTE, uint256(uint160(Currency.unwrap(quote))));
+        return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(usdcFee.toInt128(), 0), 0);
+    }
+
+    function _beforeBuy(address sender, PoolKey calldata key, SwapParams calldata params)
+        internal
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
+        // Protocol buyback (FeeCollector is PoolManager.swap sender) - do not re-tax recycle USDC.
+        if (address(feeCollector) != address(0) && sender == address(feeCollector)) {
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+        }
+
+        if (_pxtIsSpecified(key, params)) {
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+        }
+
+        uint256 usdcAmount = SignedMath.abs(params.amountSpecified);
+        if (usdcAmount == 0) revert ZeroAmount();
+
+        (uint256 donation, uint256 marketing) = PxtFeeModel.splitBuy(usdcAmount);
+        uint256 usdcFee = donation + marketing;
+        if (usdcFee == 0) {
+            return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(0, 0), 0);
+        }
+
+        Currency quote = _quoteCurrency(key);
+        poolManager.take(quote, address(this), usdcFee);
+        _accrueUsdc(quote, FeeKind.Buy, donation, marketing, 0);
+
+        emit HookFeeCharged(address(0), FeeKind.Buy, PxtFeeModel.BUY_FEE_BPS, usdcFee);
+        emit FeeCharged(address(0), address(poolManager), FeeKind.Buy, PxtFeeModel.BUY_FEE_BPS, usdcFee);
+
+        return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(usdcFee.toInt128(), 0), 0);
+    }
+
+    function _afterSell(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        internal
+        returns (bytes4, int128)
+    {
+        uint256 pxtAmount = _pxtSwapAmount(key, params, delta);
+        if (pxtAmount == 0) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
+
+        uint256 burnAmount = PxtFeeModel.splitSellBurn(PxtFeeModel.SELL_FEE_BPS, pxtAmount);
+        uint256 hookDeltaUnspecified;
+
+        if (_pxtIsSpecified(key, params)) {
+            // Exact-in: pessimistic USDC skim from output; hold for attribution rebate.
+            uint256 usdcOut = _quoteSwapAmount(key, params, delta);
+            (uint256 donation, uint256 marketing, uint256 buyback) =
+                PxtFeeModel.splitSellUsdc(PxtFeeModel.PENALTY_FEE_BPS, usdcOut);
+            uint256 usdcFee = donation + marketing + buyback;
+            if (usdcFee > 0) {
+                Currency quote = _quoteCurrency(key);
+                poolManager.take(quote, address(this), usdcFee);
+                _recordPendingSkim(pxtAmount, usdcOut, usdcFee, Currency.unwrap(quote));
+            }
+            hookDeltaUnspecified = usdcFee;
+            emit HookFeeCharged(address(0), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, usdcFee + burnAmount);
+            emit FeeCharged(
+                address(0), address(poolManager), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, usdcFee + burnAmount
+            );
+        } else {
+            // Exact-out: burn PXT via after-swap unspecified delta; USDC already held from beforeSwap.
+            // Trader ERC-20 settle is swapPxt + burn - store that so attributeSell matches.
+            if (burnAmount > 0) {
+                poolManager.take(pxtCurrency, address(this), burnAmount);
+                pxt.burnBalance(burnAmount);
+            }
+            uint256 skimmed = _tload(_T_USDC_SKIM);
+            uint256 usdcOut = _tload(_T_USDC_OUT);
+            address quoteAddr = address(uint160(_tload(_T_QUOTE)));
+            _recordPendingSkim(pxtAmount + burnAmount, usdcOut, skimmed, quoteAddr);
+            hookDeltaUnspecified = burnAmount;
+            emit HookFeeCharged(address(0), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, skimmed + burnAmount);
+            emit FeeCharged(
+                address(0), address(poolManager), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, skimmed + burnAmount
+            );
+        }
+
+        return (BaseHook.afterSwap.selector, hookDeltaUnspecified.toInt128());
+    }
+
+    function _afterBuy(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        internal
+        returns (bytes4, int128)
+    {
+        // Protocol buyback (FeeCollector is PoolManager.swap sender) - do not re-tax recycle USDC.
+        if (address(feeCollector) != address(0) && sender == address(feeCollector)) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
+
+        if (!_pxtIsSpecified(key, params)) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
+
+        uint256 usdcIn = _quoteSwapAmount(key, params, delta);
+        if (usdcIn == 0) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
+
+        (uint256 donation, uint256 marketing) = PxtFeeModel.splitBuy(usdcIn);
+        uint256 usdcFee = donation + marketing;
+        if (usdcFee == 0) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
+
+        Currency quote = _quoteCurrency(key);
+        poolManager.take(quote, address(this), usdcFee);
+        _accrueUsdc(quote, FeeKind.Buy, donation, marketing, 0);
+
+        emit HookFeeCharged(address(0), FeeKind.Buy, PxtFeeModel.BUY_FEE_BPS, usdcFee);
+        emit FeeCharged(address(0), address(poolManager), FeeKind.Buy, PxtFeeModel.BUY_FEE_BPS, usdcFee);
+
+        return (BaseHook.afterSwap.selector, usdcFee.toInt128());
+    }
+
+    function _accrueUsdc(Currency quote, FeeKind kind, uint256 donation, uint256 marketing, uint256 buyback) internal {
+        if (address(feeCollector) == address(0)) revert FeeCollectorNotSet();
+        uint256 total = donation + marketing + buyback;
+        if (total == 0) return;
+
+        address token = Currency.unwrap(quote);
+        IERC20(token).forceApprove(address(feeCollector), total);
+        feeCollector.receiveAccruedFees(token, kind, donation, marketing, 0, buyback);
+    }
+
+    function _fairSellFeeBps(address seller, uint256 amount, uint256 balanceBefore) internal view returns (uint256) {
+        Pxt.WalletStatus status = pxt.walletStatus(seller);
+        if (status == Pxt.WalletStatus.FeeExempt) return 0;
+        if (status == Pxt.WalletStatus.NoPenalty) return PxtFeeModel.SELL_FEE_BPS;
+
+        SellWindow storage window = sellWindows[seller];
+        uint256 soldInWindow = window.soldInWindow;
+        uint256 balanceAtStart = window.balanceAtWindowStart;
+
+        if (window.windowStart == 0 || block.timestamp >= window.windowStart + PxtFeeModel.PENALTY_WINDOW) {
+            soldInWindow = 0;
+            balanceAtStart = balanceBefore;
+        }
+
+        uint256 newSold = soldInWindow + amount;
+        bool penalized =
+            balanceAtStart > 0 && newSold * PxtFeeModel.BPS > balanceAtStart * PxtFeeModel.PENALTY_THRESHOLD_BPS;
+        return penalized ? PxtFeeModel.PENALTY_FEE_BPS : PxtFeeModel.SELL_FEE_BPS;
+    }
+
+    function _applySellWindow(address seller, uint256 amount, uint256 balanceBefore) internal {
+        if (pxt.walletStatus(seller) == Pxt.WalletStatus.NoPenalty) return;
+        if (pxt.walletStatus(seller) == Pxt.WalletStatus.FeeExempt) return;
+
+        SellWindow storage window = sellWindows[seller];
+        if (window.windowStart == 0 || block.timestamp >= window.windowStart + PxtFeeModel.PENALTY_WINDOW) {
+            window.windowStart = uint64(block.timestamp);
+            window.soldInWindow = 0;
+            window.balanceAtWindowStart = balanceBefore;
+        }
+        window.soldInWindow += amount;
+    }
+
+    function _enforceOfficialPool(PoolKey calldata key) internal view {
+        if (!_poolContainsPxt(key)) revert InvalidPool();
+        if (!officialPoolSet) revert OfficialPoolNotSet();
+        if (PoolId.unwrap(key.toId()) != PoolId.unwrap(officialPoolId)) revert InvalidPool();
+    }
+
+    function _poolContainsPxt(PoolKey calldata key) internal view returns (bool) {
+        address token = address(pxt);
+        return Currency.unwrap(key.currency0) == token || Currency.unwrap(key.currency1) == token;
+    }
+
+    function _pxtIsCurrency0(PoolKey calldata key) internal view returns (bool) {
+        return Currency.unwrap(key.currency0) == address(pxt);
+    }
+
+    function _quoteCurrency(PoolKey calldata key) internal view returns (Currency) {
+        return _pxtIsCurrency0(key) ? key.currency1 : key.currency0;
+    }
+
+    function _pxtSwapAmount(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        internal
+        view
+        returns (uint256)
+    {
+        if (_pxtIsSpecified(key, params)) {
+            return SignedMath.abs(params.amountSpecified);
+        }
+        int256 pxtDelta = _pxtIsCurrency0(key) ? int256(delta.amount0()) : int256(delta.amount1());
+        return SignedMath.abs(pxtDelta);
+    }
+
+    function _quoteSwapAmount(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+        internal
+        view
+        returns (uint256)
+    {
+        bool quoteIs0 = !_pxtIsCurrency0(key);
+        bool specifiedIs0 = (params.amountSpecified < 0) == params.zeroForOne;
+        if (specifiedIs0 == quoteIs0) {
+            return SignedMath.abs(params.amountSpecified);
+        }
+        int256 quoteDelta = quoteIs0 ? int256(delta.amount0()) : int256(delta.amount1());
+        return SignedMath.abs(quoteDelta);
+    }
+
+    function _classifySwap(PoolKey calldata key, SwapParams calldata params)
+        internal
+        view
+        returns (bool isBuy, bool isSell)
+    {
+        bool pxtIs0 = _pxtIsCurrency0(key);
+        if (pxtIs0) {
+            isBuy = !params.zeroForOne;
+            isSell = params.zeroForOne;
+        } else {
+            isBuy = params.zeroForOne;
+            isSell = !params.zeroForOne;
+        }
+    }
+
+    function _pxtIsSpecified(PoolKey calldata key, SwapParams calldata params) internal view returns (bool) {
+        bool specifiedIs0 = (params.amountSpecified < 0) == params.zeroForOne;
+        return specifiedIs0 == _pxtIsCurrency0(key);
+    }
+
+    function _recordPendingSkim(uint256 pxtIn, uint256 usdcOut, uint256 usdcSkim, address quote) internal {
+        _tstore(_T_PXT_IN, pxtIn);
+        _tstore(_T_USDC_OUT, usdcOut);
+        _tstore(_T_USDC_SKIM, usdcSkim);
+        _tstore(_T_QUOTE, uint256(uint160(quote)));
+        orphanSkim = OrphanSkim({
+            pxtIn: pxtIn.toUint128(), usdcOut: usdcOut.toUint128(), usdcSkim: usdcSkim.toUint128(), quote: quote
+        });
+    }
+
+    function _clearPendingSkim() internal {
+        _tstore(_T_PXT_IN, 0);
+        _tstore(_T_USDC_OUT, 0);
+        _tstore(_T_USDC_SKIM, 0);
+        _tstore(_T_QUOTE, 0);
+        orphanSkim = OrphanSkim({pxtIn: 0, usdcOut: 0, usdcSkim: 0, quote: address(0)});
+    }
+
+    function _tstore(bytes32 slot, uint256 value) internal {
+        assembly ("memory-safe") {
+            tstore(slot, value)
+        }
+    }
+
+    function _tload(bytes32 slot) internal view returns (uint256 value) {
+        assembly ("memory-safe") {
+            value := tload(slot)
+        }
+    }
+}

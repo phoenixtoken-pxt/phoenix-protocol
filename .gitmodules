@@ -1,0 +1,4 @@
+[submodule "evm/lib/uniswap-hooks"]
+	path = evm/lib/uniswap-hooks
+	url = https://github.com/OpenZeppelin/uniswap-hooks
+	# Pinned release: checkout tag v1.2.1 (commit acbd604c409a827f7f98c9517236da860c4fca1a)
