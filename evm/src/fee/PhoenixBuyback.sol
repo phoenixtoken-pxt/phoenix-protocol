@@ -57,6 +57,8 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
     int24 public tickUpper;
     bytes32 public positionSalt;
     bool public poolConfigured;
+    /// @notice True after the one-shot protocol seed mint. Recycle LP uses a different salt and is unaffected.
+    bool public seedLiquidityAdded;
 
     /// @notice Recycle band width in tick-spacings (e.g. 10 -> 10 * pool.tickSpacing).
     uint24 public recycleWidthSpacings = 10;
@@ -126,6 +128,7 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
 
     error NotHook();
     error HookAlreadySet();
+    error LiquidityAlreadySeeded();
     error NotPoolManager();
     error PoolAlreadyConfigured();
     error PoolNotConfigured();
@@ -233,13 +236,15 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         emit BuybackParamsSet(recycleWidthSpacings_, maxBuybackSlippageBps_);
     }
 
-    /// @notice Seed / increase protocol LP. Caller supplies tokens; position owned by this contract.
+    /// @notice One-shot protocol seed LP. Caller supplies tokens; position owned by this contract.
+    ///         Cannot be called again (extra LP is minted on Uniswap, not through this function).
     function addLiquidity(uint256 amount0Desired, uint256 amount1Desired, uint128 liquidity, bytes calldata hookData)
         external
         onlyOwner
         nonReentrant
     {
         if (!poolConfigured) revert PoolNotConfigured();
+        if (seedLiquidityAdded) revert LiquidityAlreadySeeded();
         if (liquidity == 0) revert ZeroLiquidity();
 
         PoolKey memory key = poolKey;
@@ -258,6 +263,7 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         });
 
         poolManager.unlock(abi.encode(ACTION_ADD, abi.encode(params, hookData)));
+        seedLiquidityAdded = true;
 
         // Return unused seed tokens to caller.
         uint256 left0 = IERC20(token0).balanceOf(address(this));
@@ -296,11 +302,15 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         return _executeBuybackCash(quote, usdcBudget, usdcAmount, minPxtBought);
     }
 
+    function _walletBurnDue(address token) internal view returns (uint256) {
+        return pendingDonation[token] + pendingMarketing[token] + pendingBurn[token];
+    }
+
     function _executeBuybackCash(address quote, uint256 usdcBudget, uint256 usdcAmount, uint256 minPxtBought)
         internal
         returns (uint256 usdcSpent, uint256 pxtBought)
     {
-        uint256 reserved = pendingDonation[quote] + pendingMarketing[quote];
+        uint256 reserved = _walletBurnDue(quote);
         uint256 bal = IERC20(quote).balanceOf(address(this));
         uint256 spendable = bal > reserved ? bal - reserved : 0;
         uint256 spend = usdcAmount == 0 ? usdcBudget : usdcAmount;
@@ -327,6 +337,7 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         PhoenixBuybackMath.enforceMinOut(pxtBought, minPxtBought, expectedPxt, maxBuybackSlippageBps);
 
         pendingBuyback[quote] = usdcBudget - spend;
+        _reconcilePending(quote);
 
         recyclePxt += recycled;
         lastRecycleTickLower = recLower;
@@ -359,10 +370,43 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         uint256 usdcBudget = pendingBuyback[quote];
         if (usdcBudget == 0) return (0, positionLiquidity);
 
-        uint256 reserved = pendingDonation[quote] + pendingMarketing[quote];
+        uint256 reserved = _walletBurnDue(quote);
         uint256 bal = IERC20(quote).balanceOf(address(this));
         uint256 spendable = bal > reserved ? bal - reserved : 0;
         usdcSpendable = usdcBudget < spendable ? usdcBudget : spendable;
+    }
+
+    /// @dev Cap all four pending legs to on-hand cash. Buyback is reserved first, then burn, then wallets.
+    function _reconcilePending(address token) internal {
+        uint256 don = pendingDonation[token];
+        uint256 mkt = pendingMarketing[token];
+        uint256 burn = pendingBurn[token];
+        uint256 bb = pendingBuyback[token];
+        uint256 due = don + mkt + burn + bb;
+        if (due == 0) return;
+
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        if (due <= bal) return;
+
+        uint256 bbKeep = bb < bal ? bb : bal;
+        uint256 rest = bal - bbKeep;
+        uint256 burnKeep = burn < rest ? burn : rest;
+        rest -= burnKeep;
+
+        uint256 wallets = don + mkt;
+        uint256 donKeep = 0;
+        uint256 mktKeep = 0;
+        if (wallets > 0 && rest > 0) {
+            donKeep = (don * rest) / wallets;
+            mktKeep = rest - donKeep;
+        }
+
+        pendingBuyback[token] = bbKeep;
+        pendingBurn[token] = burnKeep;
+        pendingDonation[token] = donKeep;
+        pendingMarketing[token] = mktKeep;
+
+        emit AccrualReconciled(token, due, bbKeep + burnKeep + donKeep + mktKeep);
     }
 
     function unlockCallback(bytes calldata rawData) external returns (bytes memory) {

@@ -80,6 +80,7 @@ contract LockProtocolReturnDelta is WalletStatusConfig {
             if (pxt.antiBotSeller() != openSell) revert AntiBotSellerMismatch();
         }
 
+        if (!collector.seedLiquidityAdded()) revert ZeroProtocolLiquidity();
         (, uint128 positionLiq) = collector.quoteBuyback();
         if (positionLiq == 0) revert ZeroProtocolLiquidity();
 
