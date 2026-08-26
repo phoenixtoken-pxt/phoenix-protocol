@@ -4,8 +4,11 @@ pragma solidity ^0.8.26;
 import {Script, console2} from "forge-std/Script.sol";
 import {PhoenixFeeCollector} from "../src/fee/PhoenixFeeCollector.sol";
 
-// Kick executeBuyback on the fork. FEE_COLLECTOR required; MIN_PXT_BOUGHT / DEADLINE_SECONDS optional.
-// Prefer a non-zero MIN_PXT_BOUGHT (keeper quote); protocol maxBuybackSlippageBps is vs live spot.
+// Kick executeBuyback on the fork. Caller must be isAuthorizedBuybackCaller.
+// FEE_COLLECTOR required; MIN_PXT_BOUGHT / DEADLINE_SECONDS optional.
+// After lock, use the keeper PRIVATE_KEY (not the deployer).
+// Prefer a non-zero MIN_PXT_BOUGHT (keeper quote); protocol maxBuybackSlippageBps is vs previous-block spot.
+// After large same-block flow, wait one block so frozenSqrtPriceX96 has been promoted.
 contract ExecuteBuyback is Script {
     uint256 internal constant DEFAULT_ANVIL_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 

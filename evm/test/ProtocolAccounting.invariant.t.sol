@@ -25,7 +25,7 @@ import {PhoenixFeeCollector} from "../src/fee/PhoenixFeeCollector.sol";
 import {HookMiner} from "../src/uniswap/v4/HookMiner.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
-/// @dev Random buy / sell / claim-sell / collect / buyback / finalize / prune after trading opens.
+/// @dev Random buy / sell / claim-sell / collect / buyback / finalize after trading opens.
 contract ProtocolAccountingHandler is Test {
     using SafeCast for uint256;
 
@@ -167,12 +167,10 @@ contract ProtocolAccountingHandler is Test {
         (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
         if (pendBb == 0) return;
         usdcAmount = bound(usdcAmount, 0, pendBb);
+        // Promote last-block swap spot into the buyback ref (Foundry often stays on one block).
+        vm.roll(block.number + 1);
         // Price impact after prior swaps can trip protocol slippage — skip those paths.
         try feeCollector.executeBuyback(usdcAmount, 0, block.timestamp + 1 hours) {} catch {}
-    }
-
-    function pruneBands() external {
-        feeCollector.pruneEmptyRecycleBands();
     }
 }
 
@@ -291,6 +289,8 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         initialSupply = pxt.totalSupply();
 
         handler = new ProtocolAccountingHandler(manager, swapRouter, pxt, musdc, hook, feeCollector, key, alice);
+        vm.prank(admin);
+        feeCollector.setAuthorizedBuybackCaller(address(handler), true);
         targetContract(address(handler));
     }
 
@@ -308,11 +308,10 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         _assertWalletBurnBacked(address(pxt));
     }
 
-    function invariant_seed_lp_unchanged_and_band_cap() public view {
+    function invariant_seed_lp_unchanged() public view {
         // Cash-only buyback never peels the seeded full-range position.
         (, uint128 positionLiq) = feeCollector.quoteBuyback();
         assertEq(positionLiq, seedPositionLiq);
-        assertLe(feeCollector.recycleBandCount(), uint256(feeCollector.MAX_RECYCLE_BANDS()));
     }
 
     function _assertWalletBurnBacked(address token) internal view {

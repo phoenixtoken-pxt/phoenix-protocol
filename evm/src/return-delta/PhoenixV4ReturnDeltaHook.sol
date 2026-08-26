@@ -14,6 +14,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {SafeCast} from "@uniswap/v4-core/src/libraries/SafeCast.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 
 import {BaseHook} from "@openzeppelin/uniswap-hooks/base/BaseHook.sol";
@@ -28,8 +29,9 @@ import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeMod
 // Overview
 // Fees are taken by adjusting swap deltas (not via the pool's LP fee). Buy, sell, and dump-penalty
 // legs are skimmed in USDC; sells also burn a fixed 1.85% of PXT input. Skimmed USDC is forwarded
-// to PhoenixFeeCollector for deferred `collect` / cash `executeBuyback`. FeeCollector buybacks
-// skip the buy skim (`sender == feeCollector`) so recycled PXT is not taxed twice.
+// to PhoenixFeeCollector for deferred `collect` / cash `executeBuyback`. Every official-pool swap
+// (including FeeCollector buybacks) records spot for the previous-block buyback price reference.
+// FeeCollector buybacks skip the buy skim (`sender == feeCollector`) so recycled PXT is not taxed twice.
 //
 // Trading gate
 // Swaps require sell unlock + anti-bot clear (`PhoenixAntiBotOpenSell` after unlock).
@@ -46,6 +48,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
     using TransientStateLibrary for IPoolManager;
 
     struct SellWindow {
@@ -206,11 +209,20 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         bytes calldata
     ) internal override returns (bytes4, int128) {
         _enforceOfficialPool(key);
+        _noteOfficialSpot();
         (bool isBuy, bool isSell) = _classifySwap(key, params);
 
         if (isSell) return _afterSell(key, params, delta);
         if (isBuy) return _afterBuy(sender, key, params, delta);
         return (BaseHook.afterSwap.selector, 0);
+    }
+
+    /// @dev Record post-swap spot on the collector (including protocol buyback; must run before
+    ///      `_afterBuy` early-returns when `sender == feeCollector`).
+    function _noteOfficialSpot() internal {
+        if (address(feeCollector) == address(0)) return;
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(officialPoolId);
+        if (sqrtPriceX96 != 0) feeCollector.noteOfficialSpot(sqrtPriceX96);
     }
 
     /// @inheritdoc ISellAttributor
