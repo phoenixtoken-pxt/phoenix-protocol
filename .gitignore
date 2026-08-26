@@ -11,3 +11,5 @@ evm/.anvil-session.env
 evm/.env.*
 !evm/.env.anvil.example
 web/.env
+public-web/*
+evm/audit/*

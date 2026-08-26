@@ -380,4 +380,64 @@ contract PxtTest is Test {
         vm.expectRevert(ZeroAddress.selector);
         pxt.setAntiBotSeller(address(0));
     }
+
+    function test_setAntiBotSeller_one_shot() public {
+        address firstSeller = makeAddr("firstSeller");
+        address secondSeller = makeAddr("secondSeller");
+
+        vm.startPrank(admin);
+        pxt.setAntiBotSeller(firstSeller);
+        vm.expectRevert(Pxt.AntiBotSellerAlreadySet.selector);
+        pxt.setAntiBotSeller(secondSeller);
+        vm.stopPrank();
+
+        assertEq(pxt.antiBotSeller(), firstSeller);
+    }
+
+    function test_setAntiBotSeller_cannot_rearm_after_clear() public {
+        address firstSeller = makeAddr("firstSeller");
+        address secondSeller = makeAddr("secondSeller");
+
+        vm.prank(admin);
+        pxt.setAntiBotSeller(firstSeller);
+
+        vm.warp(pxt.sellUnlockTimestamp());
+        vm.prank(firstSeller);
+        pxt.clearSellProtection();
+        assertTrue(pxt.sellProtectionCleared());
+
+        vm.prank(admin);
+        vm.expectRevert(Pxt.SellProtectionAlreadyCleared.selector);
+        pxt.setAntiBotSeller(secondSeller);
+    }
+
+    function test_setFeeCollector_one_shot() public {
+        address firstCollector = makeAddr("firstCollector");
+        address secondCollector = makeAddr("secondCollector");
+        vm.etch(firstCollector, hex"00");
+        vm.etch(secondCollector, hex"00");
+
+        vm.startPrank(admin);
+        pxt.setFeeCollector(firstCollector);
+        vm.expectRevert(Pxt.FeeCollectorAlreadySet.selector);
+        pxt.setFeeCollector(secondCollector);
+        vm.stopPrank();
+
+        assertEq(pxt.feeCollector(), firstCollector);
+    }
+
+    function test_setSellAttributor_one_shot() public {
+        address firstAttributor = makeAddr("firstAttributor");
+        address secondAttributor = makeAddr("secondAttributor");
+        vm.etch(firstAttributor, hex"00");
+        vm.etch(secondAttributor, hex"00");
+
+        vm.startPrank(admin);
+        pxt.setSellAttributor(ISellAttributor(firstAttributor));
+        vm.expectRevert(Pxt.SellAttributorAlreadySet.selector);
+        pxt.setSellAttributor(ISellAttributor(secondAttributor));
+        vm.stopPrank();
+
+        assertEq(address(pxt.sellAttributor()), firstAttributor);
+    }
 }

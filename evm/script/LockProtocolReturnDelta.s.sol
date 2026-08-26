@@ -35,6 +35,7 @@ contract LockProtocolReturnDelta is Script {
     error RoleHandoffFailed();
     error SellAttributorMustBeHook();
     error FeeWalletMismatch();
+    error FeeCollectorMismatch();
     error PoolManagerNotSet();
     error AntiBotSellerNotSet();
     error AntiBotSellerMismatch();
@@ -64,6 +65,7 @@ contract LockProtocolReturnDelta is Script {
         if (!hook.liquidityProvider(collectorAddr)) revert CollectorNotLiquidityProvider();
         requireSellAttributorIsHook(pxt, hookAddr);
         requireMatchingFeeWallets(pxt, collector);
+        requirePxtFeeCollector(pxt, collectorAddr);
         if (pxt.poolManager() == address(0)) revert PoolManagerNotSet();
         if (pxt.antiBotSeller() == address(0)) revert AntiBotSellerNotSet();
         if (vm.envExists("ANTI_BOT_OPEN_SELL")) {
@@ -144,6 +146,11 @@ contract LockProtocolReturnDelta is Script {
     function requireMatchingFeeWallets(Pxt pxt, PhoenixFeeCollector collector) public view {
         if (pxt.DONATION_WALLET() != collector.donationWallet()) revert FeeWalletMismatch();
         if (pxt.MARKETING_WALLET() != collector.marketingWallet()) revert FeeWalletMismatch();
+    }
+
+    /// @notice PXT must point at the same FeeCollector wired on the hook.
+    function requirePxtFeeCollector(Pxt pxt, address collectorAddr) public view {
+        if (pxt.feeCollector() != collectorAddr) revert FeeCollectorMismatch();
     }
 
     function _requireOwner(address who, address actual, address expected) internal pure {

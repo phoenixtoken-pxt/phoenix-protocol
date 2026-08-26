@@ -1026,6 +1026,24 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         locker.requireMatchingFeeWallets(pxt, feeCollector);
     }
 
+    function test_lock_protocol_requires_pxt_fee_collector() public {
+        LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
+        locker.requirePxtFeeCollector(pxt, address(feeCollector));
+    }
+
+    function test_lock_protocol_rejects_mismatched_pxt_fee_collector() public {
+        Pxt fresh = new Pxt(admin, donation, marketing, sellUnlock);
+        address wrongCollector = makeAddr("wrongCollector");
+        vm.etch(wrongCollector, hex"00");
+
+        vm.prank(admin);
+        fresh.setFeeCollector(wrongCollector);
+
+        LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
+        vm.expectRevert(LockProtocolReturnDelta.FeeCollectorMismatch.selector);
+        locker.requirePxtFeeCollector(fresh, address(feeCollector));
+    }
+
     function test_lock_protocol_rejects_mismatched_fee_wallets() public {
         address otherDonation = makeAddr("otherDonation");
         address otherMarketing = makeAddr("otherMarketing");
@@ -1068,15 +1086,16 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
     }
 
     function test_lock_protocol_rejects_wrong_sell_attributor() public {
+        Pxt fresh = new Pxt(admin, donation, marketing, sellUnlock);
         LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
         address stranger = makeAddr("wrongAttributor");
         vm.etch(stranger, hex"00");
 
         vm.prank(admin);
-        pxt.setSellAttributor(ISellAttributor(stranger));
+        fresh.setSellAttributor(ISellAttributor(stranger));
 
         vm.expectRevert(LockProtocolReturnDelta.SellAttributorMustBeHook.selector);
-        locker.requireSellAttributorIsHook(pxt, address(hook));
+        locker.requireSellAttributorIsHook(fresh, address(hook));
     }
 
     function test_lock_renounce_keeps_collect_and_blocks_admin() public {

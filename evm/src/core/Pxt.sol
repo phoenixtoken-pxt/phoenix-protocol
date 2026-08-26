@@ -19,6 +19,9 @@ import {ISellAttributor} from "../return-delta/ISellAttributor.sol";
 // - With sellAttributor set (ReturnDelta hook): notifies ISellAttributor for USDC fee
 //   attribution / dump-window rebate. Dump economics live on the hook, not on-token.
 //
+// feeCollector and sellAttributor are configured once during bootstrap, verified by
+// LockProtocolReturnDelta, then frozen when Ownable is renounced before go-live.
+//
 // Contract-recipient allowlist is gated by RECIPIENT_APPROVER_ROLE (intended for a
 // multisig). Ownable admin setters can be renounced while that role remains on the Safe.
 contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
@@ -71,6 +74,10 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
     error ContractRecipientNotApproved();
     error ProtectedRecipient();
     error InvalidSellUnlock();
+    error AntiBotSellerAlreadySet();
+    error SellProtectionAlreadyCleared();
+    error FeeCollectorAlreadySet();
+    error SellAttributorAlreadySet();
 
     constructor(address admin, address donation, address marketing, uint256 sellUnlockTimestamp_)
         ERC20("Phoenix Token", "PXT")
@@ -118,12 +125,14 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         emit PoolManagerSet(poolManager_);
     }
 
-    /// @notice Designate the first post-unlock seller (e.g. `PhoenixAntiBotOpenSell`).
+    /// @notice Designate the first post-unlock seller (e.g. `PhoenixAntiBotOpenSell`). One-shot; cannot
+    ///         reconfigure after set or after public trading has opened via `clearSellProtection`.
     /// @dev Zero is rejected; public sells open via `clearSellProtection`, not by clearing the seller.
     function setAntiBotSeller(address seller) external onlyOwner {
         if (seller == address(0)) revert ZeroAddress();
+        if (sellProtectionCleared) revert SellProtectionAlreadyCleared();
+        if (antiBotSeller != address(0)) revert AntiBotSellerAlreadySet();
         antiBotSeller = seller;
-        sellProtectionCleared = false;
         emit AntiBotSellerSet(seller);
     }
 
@@ -139,17 +148,21 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         emit SellProtectionCleared();
     }
 
-    /// @notice Protocol fee treasury / LP holder.
+    /// @notice Protocol fee treasury / LP holder. One-shot at bootstrap; Ownable is renounced
+    ///         in `LockProtocolReturnDelta` before public trading — this address cannot be changed afterward.
     function setFeeCollector(address collector_) external onlyOwner {
         if (collector_ == address(0)) revert ZeroAddress();
+        if (feeCollector != address(0)) revert FeeCollectorAlreadySet();
         feeCollector = collector_;
         _setApprovedContractRecipient(collector_, true);
         emit FeeCollectorSet(collector_);
     }
 
-    /// @notice Set sell attributor for USDC attribution / dump window on the hook.
+    /// @notice Sell attributor (ReturnDelta hook) for USDC attribution / dump window. One-shot at bootstrap;
+    ///         renounce Ownable before go-live so a mis-set attributor cannot brick pool sells.
     function setSellAttributor(ISellAttributor attributor_) external onlyOwner {
         if (address(attributor_) == address(0)) revert ZeroAddress();
+        if (address(sellAttributor) != address(0)) revert SellAttributorAlreadySet();
         sellAttributor = attributor_;
         _setApprovedContractRecipient(address(attributor_), true);
         emit SellAttributorSet(address(attributor_));
