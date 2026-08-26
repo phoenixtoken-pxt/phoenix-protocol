@@ -39,7 +39,7 @@ DEX buys and sells are enforced by the hook. Selling more than **10%** of a wall
 - **LP gate** — Allowlisted providers only during sell lock; permissionless after sell unlock.
 - **FeeExempt on DEX** — Full USDC skim rebate on sells (burn still applies). Retail buys still pay 2.7%.
 - **NoPenalty** — Inbound transfers skip the 2.7% tax; DEX sells always pay base 5.4% USDC (never dump penalty).
-- **Protocol buyback** — `executeBuyback` swaps from `FeeCollector` skip the hook buy skim (no double tax on recycle). Slippage is capped vs live spot (default **2%**, frozen at renounce). Prefer a keeper or private relay and a quote-based `minPxtBought`; Uniswap v4 has no built-in TWAP.
+- **Protocol buyback** — `executeBuyback` is **not permissionless**: only `isAuthorizedBuybackCaller` addresses may run it (keeper / ops). After lock, the deploy admin is cleared; a Safe with `BUYBACK_EXECUTOR_APPROVER_ROLE` can add or remove callers. Swaps from `FeeCollector` skip the hook buy skim (no double tax on recycle). Slippage is capped vs the **previous-block** official-pool spot (default **2%**, frozen at renounce), so same-block JIT cannot retarget the fill. Recycle LP ticks still use live spot. After large flow, keepers may wait one block so the freeze catches up. Prefer a private relay and a quote-based `minPxtBought`.
 
 ### Operational phases
 
@@ -88,7 +88,7 @@ make warp-anvil-unlock
 
 ## Local Anvil workflow
 
-Hook: `PhoenixV4ReturnDeltaHook`. Pool fee is `0` (return-delta). Hook is set as `sellAttributor` on `Pxt`. Accrued USDC fees go to `PhoenixFeeCollector` for permissionless `collect` / `executeBuyback`.
+Hook: `PhoenixV4ReturnDeltaHook`. Pool fee is `0` (return-delta). Hook is set as `sellAttributor` on `Pxt`. Accrued USDC fees go to `PhoenixFeeCollector` for permissionless `collect` and authorized `executeBuyback`.
 
 If settlement skips ERC-20 (e.g. ERC-6909 burn), call `finalizeOrphanedSell()` (or the next swap auto-finalizes) so fees reach the FeeCollector.
 
@@ -114,6 +114,7 @@ Writes `evm/.env.anvil` and `web/.env` (addresses, pool, FeeCollector).
 ```bash
 make lock-anvil
 # RECIPIENT_APPROVER=0x...  # multisig; must differ from deployer
+# BUYBACK_CALLERS=0x...     # keeper EOAs (required; deployer is cleared)
 ```
 
 ### 4. Exercise swaps (after unlock)

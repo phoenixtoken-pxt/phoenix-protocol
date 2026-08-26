@@ -12,4 +12,4 @@ evm/.env.*
 !evm/.env.anvil.example
 web/.env
 public-web/*
-evm/audit/*
+evm/audit/audit.pdf
