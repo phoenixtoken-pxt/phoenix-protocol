@@ -115,3 +115,47 @@ Same-block JIT updates pending, not frozen. Tests: `test_buyback_requires_prior_
 - A public-mempool keeper with `minPxtBought = 0` can still be sandwiched **within 2% of the frozen price**, not of live spot. Prefer a private relay and a quote-based `minPxtBought`.
 - This is not a TWAP. It is last prior-block official-pool spot.
 - `collect()` stays permissionless (payout only).
+
+---
+
+## LRSA — Liquidity Refund Sweeps Accruals
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixBuyback.addLiquidity` refunds `balanceOf(this)` |
+| **Our status** | Resolved |
+| **Code** | Working tree (`seedLiquidityAdded`) |
+
+### Finding
+
+`addLiquidity` sent the collector’s entire leftover PXT/USDC to the owner after mint, including fee USDC already sitting on the contract. Pendings were unchanged, so the bag went short.
+
+### What we shipped
+
+`addLiquidity` is **one-shot** (`seedLiquidityAdded`). A second call reverts `LiquidityAlreadySeeded`. Recycle LP (`RECYCLE_SALT` inside `executeBuyback`) is unaffected. Extra owner LP later is minted on Uniswap, not through this function.
+
+Intended order: seed once at bootstrap (no fees yet), then lock. The first-call leftover refund is unused seed, not fee USDC.
+
+---
+
+## CMBS — Collector Misaccounts Buyback Solvency
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixFeeCollector._payoutToken` / `_reconcileWalletBurnPending`; `addLiquidity` refund |
+| **Our status** | Resolved |
+| **Code** | Working tree (one-shot seed + collect reserves `pendingBuyback`) |
+
+### Finding
+
+Donation / marketing / burn / buyback share one ERC-20 balance. `collect` and reconcile only looked at the first three. If cash was already below the labels (the LRSA refund), wallets got paid from what was left and `pendingBuyback` stayed as a phantom.
+
+### What we shipped
+
+One-shot seed removes the owner sweep. `collect` pays wallets/burn only from `balance − pendingBuyback`. Reconcile haircuts **all four** legs when short (buyback kept first, then burn, then wallets). `executeBuyback` / `quoteBuyback` reserve wallet+burn dues the same way, then clip leftover buyback pending to remaining cash.
+
+### Residual risk
+
+On a short collector, unpaid donation/marketing is written off so buyback cash is not donated. Surplus tokens above all pendings are unused (not auto-assigned).

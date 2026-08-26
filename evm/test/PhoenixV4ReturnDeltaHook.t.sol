@@ -287,6 +287,14 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         feeCollector.setHook(makeAddr("otherHook"));
     }
 
+    function test_addLiquidity_is_one_shot() public {
+        assertTrue(feeCollector.seedLiquidityAdded());
+
+        vm.prank(admin);
+        vm.expectRevert(PhoenixBuyback.LiquidityAlreadySeeded.selector);
+        feeCollector.addLiquidity(1, 1, 1, abi.encode(address(feeCollector)));
+    }
+
     function test_buy_fee_exempt_still_pays_usdc_fee() public {
         // DEX FeeExempt no longer bypasses buy fees (no spoofable identity).
         vm.prank(admin);
@@ -1060,6 +1068,35 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(musdc.balanceOf(donation), donationBalBefore + donationDue);
         // Bogus burn USDC remains on collector (buyback/other) rather than bricking collect.
         assertEq(musdc.balanceOf(address(feeCollector)), bogusBurn);
+    }
+
+    function test_collect_reserves_pending_buyback() public {
+        uint256 donationAmt = 10 * WHOLE;
+        uint256 marketingAmt = 10 * WHOLE;
+        uint256 buybackAmt = 80 * WHOLE;
+
+        vm.prank(admin);
+        musdc.mint(address(hook), donationAmt + marketingAmt + buybackAmt);
+
+        vm.startPrank(address(hook));
+        musdc.approve(address(feeCollector), type(uint256).max);
+        feeCollector.receiveAccruedFees(address(musdc), FeeKind.Sell, donationAmt, marketingAmt, 0, buybackAmt);
+        vm.stopPrank();
+
+        deal(address(musdc), address(feeCollector), 50 * WHOLE);
+
+        uint256 donationBefore = musdc.balanceOf(donation);
+        uint256 marketingBefore = musdc.balanceOf(marketing);
+        feeCollector.collect();
+
+        assertEq(musdc.balanceOf(donation), donationBefore);
+        assertEq(musdc.balanceOf(marketing), marketingBefore);
+        (uint256 pendDon, uint256 pendMkt, uint256 pendBurn, uint256 pendBb) = feeCollector.pending(address(musdc));
+        assertEq(pendDon, 0);
+        assertEq(pendMkt, 0);
+        assertEq(pendBurn, 0);
+        assertEq(pendBb, 50 * WHOLE);
+        assertEq(musdc.balanceOf(address(feeCollector)), 50 * WHOLE);
     }
 
     function test_pool_manager_settlement_is_fee_free_on_token() public view {

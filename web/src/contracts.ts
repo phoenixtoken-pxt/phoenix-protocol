@@ -120,6 +120,7 @@ export const FEE_COLLECTOR_ABI = [
   "function pendingSpotBlock() view returns (uint256)",
   "function quoteBuyback() view returns (uint256 usdcSpendable, uint128 positionLiquidity)",
   "function pending(address token) view returns (uint256 donation, uint256 marketing, uint256 burnAmount, uint256 buyback)",
+  "function seedLiquidityAdded() view returns (bool)",
   "function recyclePxt() view returns (uint256)",
   "function lastRecycleTickLower() view returns (int24)",
   "function lastRecycleTickUpper() view returns (int24)",

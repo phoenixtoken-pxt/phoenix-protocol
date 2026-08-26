@@ -303,9 +303,9 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         assertGe(musdc.balanceOf(address(hook)), uint256(skim));
     }
 
-    function invariant_fee_collector_wallet_burn_pending_backed() public view {
-        _assertWalletBurnBacked(address(musdc));
-        _assertWalletBurnBacked(address(pxt));
+    function invariant_fee_collector_pending_backed() public view {
+        _assertPendingBacked(address(musdc));
+        _assertPendingBacked(address(pxt));
     }
 
     function invariant_seed_lp_unchanged() public view {
@@ -314,10 +314,9 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         assertEq(positionLiq, seedPositionLiq);
     }
 
-    function _assertWalletBurnBacked(address token) internal view {
-        (uint256 don, uint256 mkt, uint256 burn,) = feeCollector.pending(token);
-        uint256 due = don + mkt + burn;
-        assertLe(due, IERC20(token).balanceOf(address(feeCollector)));
+    function _assertPendingBacked(address token) internal view {
+        (uint256 don, uint256 mkt, uint256 burn, uint256 bb) = feeCollector.pending(token);
+        assertLe(don + mkt + burn + bb, IERC20(token).balanceOf(address(feeCollector)));
     }
 
     function _poolKey() internal view returns (PoolKey memory poolKey) {

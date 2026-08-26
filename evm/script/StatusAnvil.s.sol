@@ -71,6 +71,7 @@ contract StatusAnvil is Script {
         console2.log("pendingSpotBlock", collector.pendingSpotBlock());
         console2.log("positionLiquidity", positionLiq);
         console2.log("quoteBuyback usdcSpendable", usdcSpendable);
+        console2.log("seedLiquidityAdded", collector.seedLiquidityAdded());
         console2.log("recyclePxt", collector.recyclePxt());
         console2.log("lastRecycleTickLower", collector.lastRecycleTickLower());
         console2.log("lastRecycleTickUpper", collector.lastRecycleTickUpper());
