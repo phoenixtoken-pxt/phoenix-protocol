@@ -561,3 +561,30 @@ No on-chain `key.hooks == address(this)` in `setOfficialPool`, no `configurePool
 ### Residual risk
 
 Operator error before renounce (wrong pool, wrong ticks, huge recycle width) can permanently bind incompatible state. Mitigation is scripted bootstrap + lock ceremony checks, not additional setter guards.
+
+---
+
+## OPIIU — Official Pool Initialization Is Unrestricted
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixV4ReturnDeltaHook.sol` `getHookPermissions` / pool `initialize` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+The hook does not enable `beforeInitialize`, so it cannot restrict who calls `PoolManager.initialize` or which `sqrtPriceX96` is used. Once the CREATE2 hook address and `PoolKey` are known, any account could initialize the official pool first (one-shot). The protocol’s `initialize` would then revert, or seeding could proceed at an attacker-chosen spot if not caught.
+
+### Decision
+
+**Accepted.** This is a **pre-go-live deployment-window** risk, not post-lock runtime trust (see **CCR** / **MC**). `BootstrapReturnDeltaFork` runs `setOfficialPool` → `initialize` → seed in one scripted `broadcast` session. Production deploy should treat init as atomic: **single private bundle** (or one-tx factory) so there is no public mempool gap between hook deploy and `initialize`. Verify `getSlot0` matches the intended `sqrtPriceX96` before seeding LP / running lock.
+
+### Not done
+
+No `beforeInitialize` hook permission, no on-chain initializer allowlist, no `expectedSqrtPriceX96` guard on the hook.
+
+### Residual risk
+
+A public-mempool deploy that leaves `initialize` exposed could be front-run (grief / wrong spot). Mitigation is ops: bundle deploy + price check before seed; redeploy with a new hook salt if init is griefed. After correct init and seed, this finding does not apply.
