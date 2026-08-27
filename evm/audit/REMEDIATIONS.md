@@ -453,3 +453,30 @@ No rolling lookback, ring buffer of sell timestamps, or hourly bucket array.
 ### Residual risk
 
 A patient seller can schedule two sells around the 24h boundary for slightly more than 10% of their original bag at base fee. Mitigation is economic (penalty on large single-window dumps) and monitoring, not elimination of calendar-boundary bursts.
+
+---
+
+## FAPR — Fresh Address Penalty Reset
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixV4ReturnDeltaHook.sol` `sellWindows` / `_fairSellFeeBps` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+Dump-window state is keyed **per seller address**. A holder can sell ~10% from wallet A, transfer the rest to fresh wallet B, and get a new 10% allowance on B’s balance. Repeating across many wallets can push more than 10% of an original position through at base sell fee (5.4%) instead of penalty (37.8%).
+
+### Decision
+
+**Accepted.** Quota is intentionally **per-address** — no on-chain identity graph for fungible PXT. Splitting is self-limiting in one round: each new wallet only gets 10% of **its** balance at base tier; **selling 100% from a split wallet still triggers penalty** on that wallet. Moving the stack costs **2.7%** wallet transfer tax per hop (unless admin-tagged FeeExempt / NoPenalty). Multi-wallet extraction is many txs, repeated tax, and gas — not a free bypass of the penalty tier on a single large dump from one address.
+
+### Not done
+
+No transfer-window inheritance (`noteWalletTransfer`), inbound cooldown, or cross-wallet quota merge.
+
+### Residual risk
+
+Determined actors can chain split → sell 10% → transfer → repeat to liquidate over time at base tier plus transfer tax. Single-address dumps **>10% in 24h** remain penalized. See also **FWEPE** (calendar boundary within one address).
