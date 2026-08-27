@@ -369,16 +369,46 @@ contract PxtTest is Test {
         assertFalse(pxt.sellProtectionCleared());
     }
 
-    function test_eip7702_delegated_eoa_is_treated_as_wallet() public {
-        // 0xef0100 || 20-byte delegate target
+    function test_fake_7702_sized_contract_requires_allowlist() public {
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+        address fake = makeAddr("fake7702Contract");
+        vm.etch(fake, designation);
+
+        vm.prank(alice);
+        vm.expectRevert(Pxt.ContractRecipientNotApproved.selector);
+        pxt.transfer(fake, 100 * ONE);
+    }
+
+    function test_7702_shaped_recipient_allowed_after_multisig_approval() public {
         bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
         vm.etch(bob, designation);
 
-        uint256 amount = 100 * ONE;
-        vm.prank(alice);
-        pxt.transfer(bob, amount);
+        vm.prank(admin);
+        pxt.setApprovedContractRecipient(bob, true);
 
+        vm.prank(alice);
+        pxt.transfer(bob, 100 * ONE);
         assertEq(pxt.balanceOf(bob), 97.3e6);
+    }
+
+    function test_pool_manager_payout_to_7702_shaped_recipient() public {
+        address pm = makeAddr("poolManager");
+        address trader = makeAddr("trader7702");
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+
+        vm.etch(pm, hex"00");
+        vm.etch(trader, designation);
+
+        vm.startPrank(admin);
+        pxt.setPoolManager(pm);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        pxt.transfer(pm, 50 * ONE);
+
+        vm.prank(pm);
+        pxt.transfer(trader, 10 * ONE);
+        assertEq(pxt.balanceOf(trader), 10 * ONE);
     }
 
     function test_pool_manager_can_payout_to_contract_recipient() public {

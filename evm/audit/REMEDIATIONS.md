@@ -317,3 +317,31 @@ Cash buyback debited the full requested `spend` from `pendingBuyback` and report
 `unlockCallback` returns actual `quoteSpent`; `_executeBuybackCash` sets `usdcSpent` and reduces `pendingBuyback` by that amount. Min-out sizing uses the filled USDC, not the requested budget.
 
 Test: `test_buyback_partial_fill_keeps_pending` (tight slippage → partial fill, pending matches actual spend).
+
+---
+
+## CCIB — Code-Length Check Is Bypassable
+
+| | |
+|--|--|
+| **Criticality** | Informational (Minor) |
+| **PDF** | `Pxt.sol` `_isWallet` / `_enforceContractRecipient` |
+| **Our status** | Resolved (23-byte bypass closed; CREATE2 pre-fund accepted) |
+| **Code** | Working tree |
+
+### Finding
+
+Contract-recipient gating treated `code.length == 0` or 23-byte `0xef0100…` bytecode as a “wallet”, skipping `isApprovedContractRecipient`. Anyone could deploy a 23-byte contract mimicking EIP-7702 designation and receive PXT without multisig approval.
+
+### What we shipped
+
+`_isWallet` is now `code.length == 0` only. The EIP-7702 carve-out is removed — on-chain code cannot distinguish a delegated EOA from a 23-byte contract.
+
+- **DEX payouts:** unchanged — `_enforceContractRecipient` skips the gate when `from == poolManager` (buys / LP exits to 7702-shaped recipients still work).
+- **P2P to 7702 addresses:** requires one-time `setApprovedContractRecipient` via `RECIPIENT_APPROVER_ROLE`.
+
+Tests: `test_fake_7702_sized_contract_requires_allowlist`, `test_pool_manager_payout_to_7702_shaped_recipient`, `test_7702_shaped_recipient_allowed_after_multisig_approval`.
+
+### Accepted residual risk (CREATE2)
+
+`code.length == 0` also matches a CREATE2 address **before** the contract is deployed (pre-fund, then deploy). An unapproved contract could receive PXT that way. **Accepted:** impact is limited to routing tokens to a self-chosen contract address; it does not drain protocol custody or bypass DEX economics. Full on-chain EOA-vs-contract detection is not possible; we do not require allowlist for every EOA transfer.
