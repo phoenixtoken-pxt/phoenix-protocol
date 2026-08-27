@@ -617,3 +617,30 @@ PoolManager / FeeCollector / sell attributor remain **protected recipients** (al
 ### Residual risk
 
 Pre-lock only: `hook.setFeeCollector` can still overwrite the hook pointer (Pxt collector is one-shot, so a mismatched hook/collector pair would break ops, not accumulate extra Pxt privileges). Bootstrap sets each address once; lock script verifies wiring before renounce.
+
+---
+
+## STCBT — Seed Transfers Can Be Taxed
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixBuyback.sol` `addLiquidity`; `Pxt.sol` transfer fee on inbound to FeeCollector |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+`addLiquidity` pulls seed tokens from the owner via `transferFrom` and assumes the collector receives the full `amount*Desired`. Pxt only exempts **outbound** transfers from `feeCollector`; **owner → feeCollector** PXT is subject to the 2.7% wallet tax unless the collector has `FeeExempt` / `NoPenalty`. `addLiquidity` does not measure balance deltas, so a taxed seed can underfund LP mint or mis-seed composition. `ownerSeedBeforeUnlock` only covers **owner → PoolManager**, not owner → collector.
+
+### Decision
+
+**Accepted.** Bootstrap and tests **always** call `setWalletStatus(feeCollector, FeeExempt)` before `addLiquidity` (`BootstrapReturnDeltaFork.s.sol`). `setFeeCollector` is one-shot (**ST** / **RCRP**), so there is no post-bootstrap collector rotation that could drop the exemption. Production deploy discipline: mark FeeCollector `FeeExempt` before seed; verify in lock ceremony if desired.
+
+### Not done
+
+No auto-`FeeExempt` in `setFeeCollector`, no owner→collector seed exemption in `_quoteTransfer`, no balance-before/after checks in `addLiquidity`.
+
+### Residual risk
+
+A custom deploy that sets `feeCollector` but forgets `FeeExempt` before seed pays 2.7% on the PXT leg and may revert or mis-seed. Mitigation is scripted bootstrap + pre-lock verification, not on-chain enforcement.
