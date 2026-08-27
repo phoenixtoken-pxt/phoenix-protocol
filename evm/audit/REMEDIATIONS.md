@@ -269,3 +269,30 @@ Tests: `test_lp_gate_blocks_stranger_during_sell_lock`, `test_lp_gate_blocks_rou
 ### Residual risk
 
 No extra team LP via public routers before unlock — only one-shot seed + recycle through FeeCollector. If pre-lock LP from another contract is ever needed, deploy a dedicated non-shared locker (not POSM), not a mapping allowlist on shared routers.
+
+---
+
+## APTE — Alternate Pool Tax Evasion
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `Pxt.sol`, `PhoenixV4ReturnDeltaHook.sol` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+Hook fees, burn, and dump-window logic apply only to the one **official** pool (`officialPoolId`). Anyone can still open another PXT/USDC v4 pool on the same `PoolManager` with a different hook; swaps there skip Phoenix economics. On-token, those sells usually hit the 2.7% transfer tax only (no `pendingDexSellAmount` / full hook stack).
+
+### Decision
+
+Accepted. Permissionless v4 cannot bind all PXT pools at the token layer without breaking LP settle, buyback, and PTTB-style `PoolManager` flows. Official pool is the product surface: seeded LP, buyback/recycle, and frontends route there.
+
+### Not done
+
+No global pool ban, no “every `user → PoolManager` must be an official-hook sell”, no tax on all `PoolManager` outbound.
+
+### Residual risk
+
+Users can trade thin alternate pools at lower all-in cost. Mitigation is liquidity + routing on the official pool, not on-chain pool enumeration.
