@@ -426,3 +426,30 @@ In the PXT-as-token1 branch, `pxtForQuote` divided `sqrtPriceX96²` by `Q96` bef
 `pxtForQuote` uses one `FullMath.mulDiv` per branch (`quote × Q96² / price` or `quote × price / Q96²`). `enforceMinOut` reverts on `expected == 0` instead of accepting any nonzero output.
 
 Tests: `PhoenixBuybackMath.t.sol` (auditor counterexample + enforceMinOut).
+
+---
+
+## FWEPE — Fixed Windows Enable Penalty Evasion
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixV4ReturnDeltaHook.sol` `_fairSellFeeBps` / `_applySellWindow` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+Dump protection uses a **fixed 24h bucket** from the seller’s first sale in the window (`windowStart`, `soldInWindow`, `balanceAtWindowStart`). When the bucket expires, sold volume resets to zero and the denominator refreshes. A seller can sell ~10% of balance just before expiry and ~10% of the new balance just after, moving ~19% of the original position across the boundary at base sell fee (5.4%) instead of penalty (37.8%).
+
+### Decision
+
+**Accepted.** Rolling 24h logs or hourly buckets would add storage and gas on every sell for a bounded, timing-dependent edge case. The fixed window is intentional: simple on-chain accounting, clear UX (“first sell starts a 24h clock”), and penalty still applies to **>10% of the window-start balance within that bucket**. FBBP already addresses snapshot inflation (separate from this boundary reset).
+
+### Not done
+
+No rolling lookback, ring buffer of sell timestamps, or hourly bucket array.
+
+### Residual risk
+
+A patient seller can schedule two sells around the 24h boundary for slightly more than 10% of their original bag at base fee. Mitigation is economic (penalty on large single-window dumps) and monitoring, not elimination of calendar-boundary bursts.
