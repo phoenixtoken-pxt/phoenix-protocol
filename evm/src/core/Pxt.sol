@@ -212,12 +212,11 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         return false;
     }
 
+    /// @dev EOAs have no code. EIP-7702 delegated accounts carry 23-byte designation bytecode
+    ///      indistinguishable from a deployed contract with the same bytes (CCIB); they are not
+    ///      treated as wallets here. PoolManager→user payouts skip the allowlist separately.
     function _isWallet(address account) internal view returns (bool) {
-        uint256 size = account.code.length;
-        if (size == 0) return true;
-        if (size != 23) return false;
-        bytes memory code = account.code;
-        return code[0] == 0xef && code[1] == 0x01 && code[2] == 0x00;
+        return account.code.length == 0;
     }
 
     function _enforceContractRecipient(address from, address to) internal view {
