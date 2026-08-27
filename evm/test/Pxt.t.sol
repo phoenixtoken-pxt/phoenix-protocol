@@ -10,6 +10,20 @@ import {ISellAttributor} from "../src/return-delta/ISellAttributor.sol";
 
 contract MockPool {}
 
+contract MockAttributorNoSettle is ISellAttributor {
+    function attributeSell(address, uint256) external {}
+
+    function creditFromPoolManager(address, uint256) external {}
+
+    function pendingDexSellAmount() external pure returns (uint256) {
+        return 0;
+    }
+
+    function consumeLpInbound(uint256) external pure returns (bool) {
+        return false;
+    }
+}
+
 contract PxtTest is Test {
     using stdStorage for StdStorage;
 
@@ -270,6 +284,25 @@ contract PxtTest is Test {
         vm.prank(pm);
         pxt.transfer(bob, amount);
         assertEq(pxt.balanceOf(bob), amount);
+    }
+
+    function test_transfer_to_pool_manager_pays_tax_without_attested_settle() public {
+        address pm = makeAddr("poolManager");
+        vm.etch(pm, hex"00");
+        MockAttributorNoSettle attributor = new MockAttributorNoSettle();
+
+        vm.startPrank(admin);
+        pxt.setPoolManager(pm);
+        pxt.setSellAttributor(attributor);
+        vm.stopPrank();
+
+        uint256 amount = 100 * ONE;
+        uint256 donationBefore = pxt.balanceOf(donation);
+        vm.prank(alice);
+        pxt.transfer(pm, amount);
+
+        assertEq(pxt.balanceOf(pm), 97.3e6);
+        assertEq(pxt.balanceOf(donation), donationBefore + 1.45e6);
     }
 
     function test_feeExempt_sender_still_sell_locked() public {

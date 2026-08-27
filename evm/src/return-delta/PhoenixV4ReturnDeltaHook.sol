@@ -36,6 +36,7 @@ import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeMod
 // Trading gate
 // Swaps require sell unlock + anti-bot clear (`PhoenixAntiBotOpenSell` after unlock).
 // Liquidity: allowlisted providers only while sells are locked; permissionless after unlock.
+// User→PoolManager is fee-free only for attested DEX sells and LP mints (PTTB).
 //
 // Dump window
 // Large sells take a pessimistic USDC skim up front. The authentic seller reclaiming via
@@ -79,6 +80,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     bytes32 private constant _T_QUOTE = keccak256("phoenix.rd.pending.quote");
     /// @dev keccak256(abi.encode(_T_PM_IN, account)) → PXT received from PoolManager this tx.
     bytes32 private constant _T_PM_IN = keccak256("phoenix.rd.pmIn");
+    /// @dev Official-pool LP mint: PXT the locker still owes PoolManager this tx (PTTB).
+    bytes32 private constant _T_LP_IN = keccak256("phoenix.rd.lpIn");
 
     /// @notice Persistent skim awaiting attributeSell or finalizeOrphanedSell (ERC-6909).
     struct OrphanSkim {
@@ -151,7 +154,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             beforeInitialize: false,
             afterInitialize: false,
             beforeAddLiquidity: true,
-            afterAddLiquidity: false,
+            afterAddLiquidity: true,
             beforeRemoveLiquidity: false,
             afterRemoveLiquidity: false,
             beforeSwap: true,
@@ -167,8 +170,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
 
     function flags() public pure returns (uint160) {
         return uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
     }
 
@@ -184,6 +187,23 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             if (!liquidityProvider[sender]) revert LiquidityNotAllowed();
         }
         return this.beforeAddLiquidity.selector;
+    }
+
+    /// @dev Reserve the PXT the locker will settle so a same-tx hop cannot ride the LP path (PTTB).
+    function _afterAddLiquidity(
+        address,
+        PoolKey calldata key,
+        ModifyLiquidityParams calldata,
+        BalanceDelta delta,
+        BalanceDelta,
+        bytes calldata
+    ) internal override returns (bytes4, BalanceDelta) {
+        _enforceOfficialPool(key);
+        int256 pxtDelta = _pxtIsCurrency0(key) ? int256(delta.amount0()) : int256(delta.amount1());
+        if (pxtDelta < 0) {
+            _tstore(_T_LP_IN, _tload(_T_LP_IN) + uint256(-pxtDelta));
+        }
+        return (this.afterAddLiquidity.selector, BalanceDelta.wrap(0));
     }
 
     function _beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
@@ -236,6 +256,21 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         if (address(feeCollector) != address(0) && account == address(feeCollector)) return;
         bytes32 slot = _pmInSlot(account);
         _tstore(slot, _tload(slot) + amount);
+    }
+
+    /// @inheritdoc ISellAttributor
+    function pendingDexSellAmount() external view returns (uint256) {
+        return _tload(_T_PXT_IN);
+    }
+
+    /// @inheritdoc ISellAttributor
+    function consumeLpInbound(uint256 amount) external returns (bool) {
+        if (msg.sender != address(pxt)) revert OnlyPxt();
+        if (amount == 0) return false;
+        uint256 left = _tload(_T_LP_IN);
+        if (left < amount) return false;
+        _tstore(_T_LP_IN, left - amount);
+        return true;
     }
 
     /// @inheritdoc ISellAttributor
@@ -412,11 +447,11 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             (uint256 donation, uint256 marketing, uint256 buyback) =
                 PxtFeeModel.splitSellUsdc(PxtFeeModel.PENALTY_FEE_BPS, usdcOut);
             uint256 usdcFee = donation + marketing + buyback;
+            Currency quote = _quoteCurrency(key);
             if (usdcFee > 0) {
-                Currency quote = _quoteCurrency(key);
                 poolManager.take(quote, address(this), usdcFee);
-                _recordPendingSkim(pxtAmount, usdcOut, usdcFee, Currency.unwrap(quote));
             }
+            _recordPendingSkim(pxtAmount, usdcOut, usdcFee, Currency.unwrap(quote));
             hookDeltaUnspecified = usdcFee;
             emit HookFeeCharged(address(0), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, usdcFee + burnAmount);
             emit FeeCharged(

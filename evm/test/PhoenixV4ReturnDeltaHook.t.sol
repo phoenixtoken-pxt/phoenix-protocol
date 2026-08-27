@@ -119,8 +119,8 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         pxt.setPoolManager(address(manager));
 
         uint160 flags = uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         (address hookAddr, bytes32 salt) = HookMiner.find(
             address(this), flags, type(PhoenixV4ReturnDeltaHook).creationCode, abi.encode(manager, pxt, antiBot, admin)
@@ -186,6 +186,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
     function test_hook_flags_have_return_delta() public view {
         uint160 f = hook.flags();
         assertEq(f & Hooks.BEFORE_ADD_LIQUIDITY_FLAG, Hooks.BEFORE_ADD_LIQUIDITY_FLAG);
+        assertEq(f & Hooks.AFTER_ADD_LIQUIDITY_FLAG, Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         assertEq(f & Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG, Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
         assertEq(f & Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG, Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG);
         assertEq(f & Hooks.BEFORE_SWAP_FLAG, Hooks.BEFORE_SWAP_FLAG);
@@ -233,8 +234,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.stopPrank();
 
         vm.warp(sellUnlock);
-        // Public LP settle is user→PoolManager; anti-bot must be cleared first.
-        _clearAntiBot();
+        // LP settle is attested inbound, not a DEX sell — anti-bot need not be cleared.
 
         uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(0);
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
@@ -248,6 +248,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.startPrank(stranger);
         IERC20(address(pxt)).approve(address(lpRouter), type(uint256).max);
         musdc.approve(address(lpRouter), type(uint256).max);
+        uint256 donationBefore = pxt.balanceOf(donation);
         lpRouter.modifyLiquidity(
             key,
             ModifyLiquidityParams({
@@ -259,6 +260,25 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
             abi.encode(stranger)
         );
         vm.stopPrank();
+        assertEq(pxt.balanceOf(donation), donationBefore);
+    }
+
+    /// @dev Naked user→PoolManager (no swap / LP) pays the 2.7% transfer tax (PTTB).
+    function test_transfer_to_pool_manager_without_swap_pays_tax() public {
+        _openSells();
+        uint256 amount = 100 * WHOLE;
+        uint256 donationBefore = pxt.balanceOf(donation);
+        uint256 marketingBefore = pxt.balanceOf(marketing);
+        uint256 pmBefore = pxt.balanceOf(address(manager));
+
+        vm.prank(alice);
+        pxt.transfer(address(manager), amount);
+
+        uint256 expectDon = (amount * PxtFeeModel.BUY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (amount * PxtFeeModel.TRANSFER_FEE_BPS) / PxtFeeModel.BPS - expectDon;
+        assertEq(pxt.balanceOf(address(manager)), pmBefore + amount - expectDon - expectMkt);
+        assertEq(pxt.balanceOf(donation), donationBefore + expectDon);
+        assertEq(pxt.balanceOf(marketing), marketingBefore + expectMkt);
     }
 
     function test_buy_skims_usdc_to_fee_collector() public {
