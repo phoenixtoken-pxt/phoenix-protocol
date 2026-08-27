@@ -503,3 +503,32 @@ Corrected constant to `1_803_859_200` (true **2027-03-01 00:00:00 UTC**). Regres
 ### Residual risk
 
 Production deploy must pass the intended unlock at constructor time (immutable). `write-anvil-session.sh` already computed the correct date via `date`; only the Solidity fallback was wrong.
+
+---
+
+## LFRU — LP Fees Remain Unallocated
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixFeeCollector.sol` `collect()` |
+| **Our status** | Resolved |
+| **Code** | Working tree (with PBRD collect cleanup) |
+
+### Finding
+
+An older `collect()` path pulled Uniswap **LP fee growth** into the collector but did not book those tokens to any pending category. `_payoutToken` only paid pre-existing donation / marketing / burn obligations, so surplus LP fees could sit unallocated on the contract.
+
+### Decision
+
+**Resolved by design.** The official pool is deployed with **`PoolKey.fee == 0`** (see **EOIPF**). Protocol economics come from **hook USDC skims** booked via `receiveAccruedFees`, not from v4 LP fee tiers. LP fee growth on the official pool is therefore always zero.
+
+As part of **PBRD** cleanup, `collect()` **no longer pulls Uniswap LP fees** — it only pays pending donation / marketing / burn from on-hand tokens (buyback pending stays for `executeBuyback`).
+
+### Not done
+
+No LP-fee allocation policy (unnecessary at fee 0). No on-chain `require(key.fee == 0)` in `configurePool` — bootstrap and ops docs enforce zero LP fee instead.
+
+### Residual risk
+
+If a misconfigured pool were ever wired with a non-zero LP fee, those fees would accrue to LP positions on Uniswap, not to the hook skim ledger. Mitigation is deploy discipline: bootstrap uses `LP_FEE = 0`; do not point `configurePool` at a fee-bearing pool.
