@@ -10,14 +10,14 @@ Team notes against [audit.pdf](audit.pdf) (Cyberscope, Aug 2026, commit `752cf67
 |--|--|
 | **Criticality** | Critical |
 | **PDF** | `Pxt.sol`, `PxtSellAccess.sol`, `PhoenixV4ReturnDeltaHook.sol` |
-| **Our status** | Resolved (anti-bot freeze + one-shot wiring). Runtime collector/attributor revert is accepted, not try/caught. |
+| **Our status** | Resolved. Ownable is renounced on Pxt, Hook, and FeeCollector **before go-live** (`LockProtocolReturnDelta`); no owner remains who can re-freeze sells or rotate wiring after launch. Anti-bot freeze + one-shot wiring in code. Runtime collector/attributor revert is accepted, not try/caught. |
 | **Code** | `62f00b9` (`fix: remediate ST - Stops Transactions`) |
 
 ### Finding (two halves)
 
-1. **Owner sell-freeze.** While Ownable is live, `setAntiBotSeller` could be called after unlock and set `sellProtectionCleared = false`. Only the new anti-bot address could sell; hook sells hit `enforceTradingOpen`. Buys and wallet transfers still worked. Renounce removed the vector only if the lock ceremony actually ran.
+1. **Owner sell-freeze.** While Ownable is live, `setAntiBotSeller` could be called after unlock and set `sellProtectionCleared = false`. Only the new anti-bot address could sell; hook sells hit `enforceTradingOpen`. Buys and wallet transfers still worked. **Not a production issue:** we renounce Ownable on Pxt (and Hook / FeeCollector) before go-live; after lock there is no owner who can re-arm the freeze.
 
-2. **Hard dependencies.** Every ERC-20 sell calls `sellAttributor.attributeSell`; fee finalization calls `feeCollector.receiveAccruedFees`. A wrong or reverting address bricks sells. An unfinalizable orphan makes `_beforeSwap` call `finalizeOrphanedSell` and can brick **all** official-pool swaps. Setters accepted any nonzero address.
+2. **Hard dependencies.** Every ERC-20 sell calls `sellAttributor.attributeSell`; fee finalization calls `feeCollector.receiveAccruedFees`. A wrong or reverting address bricks sells. An unfinalizable orphan makes `_beforeSwap` call `finalizeOrphanedSell` and can brick **all** official-pool swaps. Setters accepted any nonzero address. Mitigated by one-shot setters + lock-script checks before renounce; post-launch there is no owner to point at a malicious address.
 
 ### What we shipped
 
@@ -31,7 +31,7 @@ Public sells still open via `clearSellProtection` (designated seller after unloc
 
 **Collector and attributor are one-shot** (`setFeeCollector`, `setSellAttributor`): cannot be rotated after bootstrap. A mis-set address is still fatal, but it cannot be swapped in later to freeze sells. PoolManager / FeeCollector / sell attributor remain **protected recipients** (already in `752cf67`): the allowlist bit cannot be revoked, so DEX settlement cannot be gated off that way.
 
-Lock-script checks (out of auditor `src` scope, still required for go-live) verify hook = attributor, matching fee wallets, and Pxt’s collector address before Ownable renounce.
+Lock-script checks (out of auditor `src` scope, **required before go-live**) verify hook = attributor, matching fee wallets, and Pxt’s collector address, then **renounce Ownable** on FeeCollector → Hook → Pxt. Trading is not considered live until that ceremony completes; with `owner == address(0)`, the audit’s owner-toggle sell-freeze and mis-set wiring paths no longer apply.
 
 ### Rejected / not done
 
@@ -41,8 +41,8 @@ We did **not** skip auto-finalize of orphans on collector failure. Retry remains
 
 ### Residual risk
 
-- Until Ownable is renounced, the owner can still `setWalletStatus` and other admin functions (see CCR). ST’s **sell-freeze-after-open** path is closed in code even before renounce.
-- A one-shot wrong attributor/collector at bootstrap still bricks sells until a new deploy. That is deploy-time, not a post-open toggle.
+- **Pre-go-live only:** Until the lock ceremony runs, the deployer still has Ownable admin powers (e.g. `setWalletStatus`; see CCR). ST’s **sell-freeze-after-open** path is already closed in code even before renounce. **Production assumption:** renounce before any public trading; ST is not treated as open after lock.
+- A one-shot wrong attributor/collector at bootstrap still bricks sells until a new deploy. That is deploy-time verification, not a post-launch owner toggle.
 - If the collector later reverts on `receiveAccruedFees`, an orphan can still stall official-pool swaps until it is fixed or finalized. We accepted that over hiding fee failures.
 
 ---
