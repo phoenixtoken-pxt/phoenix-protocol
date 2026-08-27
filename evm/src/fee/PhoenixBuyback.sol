@@ -324,19 +324,19 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
         bool zeroForOne = !pxtIsToken0;
         uint160 sqrtLimit =
             PhoenixBuybackMath.sqrtPriceLimitAfterSlippage(sqrtPriceX96, zeroForOne, maxBuybackSlippageBps);
-        uint256 expectedPxt = PhoenixBuybackMath.pxtForQuote(spend, sqrtPriceX96, pxtIsToken0);
 
         bytes memory result = poolManager.unlock(
             abi.encode(ACTION_BUYBACK_CASH, abi.encode(spend, sqrtLimit, abi.encode(address(this))))
         );
-        (uint256 recycled, int24 recLower, int24 recUpper, uint128 recLiq) =
-            abi.decode(result, (uint256, int24, int24, uint128));
+        (uint256 quoteSpent, uint256 recycled, int24 recLower, int24 recUpper, uint128 recLiq) =
+            abi.decode(result, (uint256, uint256, int24, int24, uint128));
 
-        usdcSpent = spend;
+        usdcSpent = quoteSpent;
         pxtBought = recycled;
+        uint256 expectedPxt = PhoenixBuybackMath.pxtForQuote(usdcSpent, sqrtPriceX96, pxtIsToken0);
         PhoenixBuybackMath.enforceMinOut(pxtBought, minPxtBought, expectedPxt, maxBuybackSlippageBps);
 
-        pendingBuyback[quote] = usdcBudget - spend;
+        pendingBuyback[quote] = usdcBudget - usdcSpent;
         _reconcilePending(quote);
 
         recyclePxt += recycled;
@@ -442,6 +442,7 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
             bool pxtIsToken0 = Currency.unwrap(key.currency0) == pxtAddr;
             uint256 pxtStart = IERC20(pxtAddr).balanceOf(address(this));
 
+            uint256 quoteSpent = 0;
             if (usdcSpend > 0) {
                 bool zeroForOne = !pxtIsToken0;
                 Currency quoteCurrency = pxtIsToken0 ? key.currency1 : key.currency0;
@@ -459,14 +460,14 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
                 );
 
                 if (zeroForOne) {
-                    uint256 quoteOwed = uint256(int256(-swapDelta.amount0()));
-                    quoteCurrency.settle(poolManager, address(this), quoteOwed, false);
+                    quoteSpent = uint256(int256(-swapDelta.amount0()));
+                    quoteCurrency.settle(poolManager, address(this), quoteSpent, false);
                     if (swapDelta.amount1() > 0) {
                         pxtCurrency_.take(poolManager, address(this), uint256(int256(swapDelta.amount1())), false);
                     }
                 } else {
-                    uint256 quoteOwed = uint256(int256(-swapDelta.amount1()));
-                    quoteCurrency.settle(poolManager, address(this), quoteOwed, false);
+                    quoteSpent = uint256(int256(-swapDelta.amount1()));
+                    quoteCurrency.settle(poolManager, address(this), quoteSpent, false);
                     if (swapDelta.amount0() > 0) {
                         pxtCurrency_.take(poolManager, address(this), uint256(int256(swapDelta.amount0())), false);
                     }
@@ -481,7 +482,7 @@ abstract contract PhoenixBuyback is IUnlockCallback, Ownable, AccessControl, Ree
                 (recLower, recUpper, recLiq) = _addRecycleLiquidity(key, recycleAdded, pxtIsToken0, hookData);
             }
 
-            return abi.encode(recycleAdded, recLower, recUpper, recLiq);
+            return abi.encode(quoteSpent, recycleAdded, recLower, recUpper, recLiq);
         }
 
         revert InvalidAction();
