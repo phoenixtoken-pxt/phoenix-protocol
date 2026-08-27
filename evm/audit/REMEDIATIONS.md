@@ -1,6 +1,6 @@
 # Audit remediations - Phoenix Protocol
 
-Team notes against [audit.pdf](audit.pdf) (Cyberscope, Aug 2026, commit `752cf67`). Scope for the review is [AUDIT_SCOPE.md](../../AUDIT_SCOPE.md) (`evm/src/` only).
+Team notes against [audit.pdf](audit.pdf) (Cyberscope, Aug 2026, commit `752cf67`). Scope for the review is [AUDIT_SCOPE.md](../../AUDIT_SCOPE.md) (`evm/src/` only). **Criticality** labels match the PDF (Critical / Medium / Minor / Informative).
 
 ---
 
@@ -324,7 +324,7 @@ Test: `test_buyback_partial_fill_keeps_pending` (tight slippage → partial fill
 
 | | |
 |--|--|
-| **Criticality** | Informational (Minor) |
+| **Criticality** | Minor / Informative |
 | **PDF** | `Pxt.sol` `_isWallet` / `_enforceContractRecipient` |
 | **Our status** | Resolved (23-byte bypass closed; CREATE2 pre-fund accepted) |
 | **Code** | Working tree |
@@ -345,3 +345,33 @@ Tests: `test_fake_7702_sized_contract_requires_allowlist`, `test_pool_manager_pa
 ### Accepted residual risk (CREATE2)
 
 `code.length == 0` also matches a CREATE2 address **before** the contract is deployed (pre-fund, then deploy). An unapproved contract could receive PXT that way. **Accepted:** impact is limited to routing tokens to a self-chosen contract address; it does not drain protocol custody or bypass DEX economics. Full on-chain EOA-vs-contract detection is not possible; we do not require allowlist for every EOA transfer.
+
+---
+
+## CCR — Contract Centralization Risk
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `Pxt.sol`, `PhoenixV4ReturnDeltaHook.sol`, `PhoenixFeeCollector.sol` / `PhoenixBuyback.sol` |
+| **Our status** | Accepted (by design); mitigated by mandatory pre-go-live lock |
+| **Code** | N/A (operational ceremony: `LockProtocolReturnDelta`) |
+
+### Finding
+
+While `Ownable` is live, the deployer can change privileged configuration — e.g. `setWalletStatus` (FeeExempt / NoPenalty), `setPoolManager`, hook/collector wiring, buyback params, and (before one-shot setters fire) bootstrap addresses. That is centralization / admin trust during deployment and setup.
+
+### Decision
+
+**Acknowledged and by design.** Bootstrap requires a trusted deployer to mint supply, wire the official pool, seed LP, configure anti-bot, and run checks. **Production is not live until the lock ceremony completes:** `LockProtocolReturnDelta` renounces Ownable on **FeeCollector → Hook → Pxt** after verification (hook = attributor, fee wallets, collector address, buyback callers, etc.). After renounce, `owner == address(0)` on those three contracts — no deployer path to `setWalletStatus`, rotate one-shot wiring, or other owner-only setters.
+
+Intentional **post-lock** governance remains on a multisig via AccessControl (not Ownable): `RECIPIENT_APPROVER_ROLE` on Pxt (`setApprovedContractRecipient`), `BUYBACK_EXECUTOR_APPROVER_ROLE` on FeeCollector (`setAuthorizedBuybackCaller`). That is limited ops governance, not full protocol centralization.
+
+### Not done
+
+No timelock on renounce itself; no on-chain “go-live” flag beyond `owner == 0` after the scripted ceremony. Trust the lock script + multisig handoff is executed before public trading.
+
+### Residual risk
+
+- **Pre-go-live only:** Until renounce, treat the deployer as trusted (see ST cross-ref). Do not open public trading before lock.
+- Post-lock, multisig can still add/remove approved contract recipients and buyback callers — scoped roles by design, not owner takeover of sell lock or fee economics.
