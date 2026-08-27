@@ -12,6 +12,7 @@ import {ISellAttributor} from "../return-delta/ISellAttributor.sol";
 // Fee-on-transfer ERC20. Wallet transfers take 2.7% unless the recipient is FeeExempt
 // or NoPenalty. PoolManager *outbound* (buys / LP exits) is fee-free. User→PoolManager is
 // fee-free only for attested DEX sells and LP mints, plus FeeCollector/owner seed (PTTB).
+// Hook outbound (unfilled exact-in burn refund to the seller) is fee-free (RIFM).
 //
 // DEX sell settlement (user -> PoolManager) is authenticated by token custody:
 // - Sell lock + anti-bot first seller are enforced here.
@@ -246,7 +247,8 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
             // before sell unlock so deploy can seed then renounce. After renounce owner==0.
             bool collectorSettle = feeCollector != address(0) && from == feeCollector;
             bool ownerSeedBeforeUnlock = from == owner() && block.timestamp < SELL_UNLOCK_TIMESTAMP;
-            if (collectorSettle || ownerSeedBeforeUnlock) {
+            bool attributorSettle = address(sellAttributor) != address(0) && from == address(sellAttributor);
+            if (collectorSettle || ownerSeedBeforeUnlock || attributorSettle) {
                 if (address(sellAttributor) != address(0)) {
                     sellAttributor.consumeLpInbound(amount);
                 }
@@ -317,6 +319,11 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         returns (FeeBreakdown memory breakdown)
     {
         if (poolManager != address(0) && from == poolManager) {
+            return PxtFeeModel.noFee(amount);
+        }
+
+        // Hook → seller refund of unfilled exact-in burn (RIFM); also hook → PoolManager.
+        if (address(sellAttributor) != address(0) && from == address(sellAttributor)) {
             return PxtFeeModel.noFee(amount);
         }
 

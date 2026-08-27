@@ -73,6 +73,19 @@ library PxtFeeModel {
         });
     }
 
+    /// @notice Fee `f` such that `f / (net + f) == bps / BPS` (exact-out / true-up of pool-leg).
+    function grossUp(uint256 net, uint256 bps) internal pure returns (uint256 fee) {
+        if (bps == 0 || net == 0) return 0;
+        return (net * bps) / (BPS - bps);
+    }
+
+    /// @notice USDC skim bps for a sell / penalty tier.
+    function sellUsdcBps(uint256 feeBps) internal pure returns (uint256) {
+        if (feeBps == PENALTY_FEE_BPS) return PENALTY_USDC_FEE_BPS;
+        if (feeBps == 0) return 0;
+        return SELL_USDC_FEE_BPS;
+    }
+
     /// @notice Buy (hook, USDC input) and transfer (PXT) share the same 1.45% / 1.25% split.
     /// @dev Marketing is the remainder so donation + marketing == amount * BUY_FEE_BPS / BPS.
     function splitBuy(uint256 amount) internal pure returns (uint256 donation, uint256 marketing) {

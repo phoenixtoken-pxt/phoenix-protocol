@@ -11,15 +11,17 @@ import {
 import { formatBal, formatUnix, parseAmount, shortAddr } from "./lib/format";
 import { readLpFees, type LpFeeSnapshot } from "./lib/lpFees";
 import { assertLocalDeploy, readProvider } from "./lib/providers";
-import { quoteExactIn, type SwapQuote } from "./lib/quoteV4";
+import { quoteSwap, type SwapQuote } from "./lib/quoteV4";
 import { formatSpot } from "./lib/spotPrice";
 import {
   readPxtClaimBalance,
   openTradingWithFirstSell,
   swapExactIn,
+  swapExactOut,
   transferPxt,
   type SettlementMode,
   type SwapDirection,
+  type SwapExactness,
 } from "./lib/swapV4";
 import { readChainTimestamp, warpBySeconds, warpToSellUnlock } from "./lib/warpTime";
 import "./App.css";
@@ -188,6 +190,7 @@ export function App() {
 
   const [direction, setDirection] = useState<SwapDirection>("buy");
   const [settlement, setSettlement] = useState<SettlementMode>("wallet");
+  const [exactness, setExactness] = useState<SwapExactness>("exactIn");
   const [amount, setAmount] = useState("100");
   const [quote, setQuote] = useState<SwapQuote | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
@@ -250,7 +253,7 @@ export function App() {
     setHook({ antiBot, openSellOperator, cleared, sellUnlock, chainNow });
 
     try {
-      const orphan = (await hookC.orphanSkim()) as [bigint, bigint, bigint, string];
+      const orphan = (await hookC.orphanSkim()) as [bigint, bigint, bigint, string, boolean];
       setOrphanUsdcSkim(orphan[2]);
     } catch {
       setOrphanUsdcSkim(0n);
@@ -335,19 +338,21 @@ export function App() {
         setQuoteError(null);
         try {
           const amt = parseAmount(amount, 6);
-          const q = await quoteExactIn(direction, amt, trader, settlement);
+          const q = await quoteSwap(direction, amt, trader, settlement, exactness);
           if (cancelled) return;
           setQuote(q);
+          const pxtNeed = q.walletPxtOut;
           // Dump surcharge is extra ERC-20 PXT — claim burns skip the on-token dump path.
           if (
             settlement === "wallet" &&
             direction === "sell" &&
-            q.extraPxtCost > 0n &&
-            balances.pxt < q.amountIn + q.extraPxtCost
+            pxtNeed > 0n &&
+            balances.pxt < pxtNeed
           ) {
-            const need = q.amountIn + q.extraPxtCost;
             setQuoteError(
-              `Dump sell needs ${formatBal(need)} PXT (swap ${formatBal(q.amountIn)} + dump ${formatBal(q.extraPxtCost)}); wallet has ${formatBal(balances.pxt)}. Sell at most ~75.5% of balance.`,
+              q.extraPxtCost > 0n
+                ? `Dump sell needs ${formatBal(pxtNeed)} PXT (swap ${formatBal(q.amountIn)} + dump ${formatBal(q.extraPxtCost)}); wallet has ${formatBal(balances.pxt)}. Sell at most ~75.5% of balance.`
+                : `Not enough PXT: need ${formatBal(pxtNeed)}, have ${formatBal(balances.pxt)}.`,
             );
           } else if (settlement === "claims" && direction === "sell" && balances.pxtClaims < q.amountIn) {
             setQuoteError(
@@ -376,6 +381,7 @@ export function App() {
     amount,
     direction,
     settlement,
+    exactness,
     account,
     walletIndex,
     spot?.tick,
@@ -406,7 +412,7 @@ export function App() {
 
   async function onSwap() {
     if (!signer) return;
-    if (!quote || quote.direction !== direction) {
+    if (!quote || quote.direction !== direction || quote.exactness !== exactness) {
       setStatus("Wait for quote to finish");
       setStatusKind("error");
       return;
@@ -415,17 +421,23 @@ export function App() {
     setStatusKind("");
     setLastTxHash(null);
     try {
-      const amt = quote.amountIn;
+      const exactOut = quote.exactness === "exactOut";
       setStatus(
-        direction === "sell" && settlement === "wallet" && quote.extraPxtCost > 0n
-          ? `Selling ${formatBal(amt)} PXT (+ ${formatBal(quote.extraPxtCost)} dump)...`
-          : direction === "sell" && settlement === "claims"
-            ? `Selling ${formatBal(amt)} PXT claims (burn)...`
-            : direction === "buy" && settlement === "claims"
-              ? `Buying ${amount} mUSDC → PXT claims...`
-              : `${direction === "buy" ? "Buying" : "Selling"} ${amount}...`,
+        exactOut
+          ? direction === "buy"
+            ? `Buying ${formatBal(quote.specifiedAmount)} PXT (exact out)...`
+            : `Selling for ${formatBal(quote.specifiedAmount)} mUSDC (exact out)...`
+          : direction === "sell" && settlement === "wallet" && quote.extraPxtCost > 0n
+            ? `Selling ${formatBal(quote.amountIn)} PXT (+ ${formatBal(quote.extraPxtCost)} dump)...`
+            : direction === "sell" && settlement === "claims"
+              ? `Selling ${formatBal(quote.amountIn)} PXT claims (burn)...`
+              : direction === "buy" && settlement === "claims"
+                ? `Buying ${amount} mUSDC → PXT claims...`
+                : `${direction === "buy" ? "Buying" : "Selling"} ${amount}...`,
       );
-      const hash = await swapExactIn(signer, direction, amt, settlement);
+      const hash = exactOut
+        ? await swapExactOut(signer, direction, quote.specifiedAmount, quote.amountIn, settlement)
+        : await swapExactIn(signer, direction, quote.amountIn, settlement);
       setLastTxHash(hash);
       setTxCopied(false);
       setStatus("Swap ok");
@@ -653,6 +665,12 @@ export function App() {
       return;
     }
 
+    if (exactness === "exactOut") {
+      setStatus("Open trading uses Exact in. Switch to Exact in and set a PXT sell amount.");
+      setStatusKind("error");
+      return;
+    }
+
     let amt: bigint;
     try {
       amt = parseAmount(amount, 6);
@@ -860,10 +878,40 @@ export function App() {
                   Claims (ERC-6909)
                 </button>
               </div>
+              <div className="seg">
+                <button
+                  type="button"
+                  className={exactness === "exactIn" ? "active" : ""}
+                  onClick={() => setExactness("exactIn")}
+                >
+                  Exact in
+                </button>
+                <button
+                  type="button"
+                  className={exactness === "exactOut" ? "active" : ""}
+                  onClick={() => setExactness("exactOut")}
+                >
+                  Exact out
+                </button>
+              </div>
               <label>
-                Amount ({direction === "buy" ? "mUSDC in" : "PXT into pool"})
+                Amount (
+                {exactness === "exactOut"
+                  ? direction === "buy"
+                    ? "PXT out"
+                    : "mUSDC out"
+                  : direction === "buy"
+                    ? "mUSDC in"
+                    : "PXT into pool"}
+                )
                 <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-                {settlement === "claims" ? (
+                {exactness === "exactOut" ? (
+                  <p className="hint" style={{ marginTop: 6 }}>
+                    You specify what you receive. Fees are grossed up so 2.7% / 5.4% / 37.8% apply to
+                    total flow. Dump-tier: Tester #5, Sell, large mUSDC out (&gt;10% of bag) — skim is
+                    bigger than old net×bps.
+                  </p>
+                ) : settlement === "claims" ? (
                   <p className="hint" style={{ marginTop: 6 }}>
                     {direction === "buy"
                       ? "Output is minted as PoolManager PXT claims (not ERC-20). Sell those claims later with Claims settlement."
@@ -900,6 +948,14 @@ export function App() {
                           ? "PXT claims"
                           : quote.tokenOutSymbol}
                       </dd>
+                      {quote.exactness === "exactOut" && quote.nowFeeUsdc > quote.legacyFeeUsdc ? (
+                        <>
+                          <dt>USDC fee (old net×bps)</dt>
+                          <dd className="quote-was">−{formatBal(quote.legacyFeeUsdc)} mUSDC</dd>
+                          <dt>USDC fee (now, gross-up)</dt>
+                          <dd>−{formatBal(quote.nowFeeUsdc)} mUSDC</dd>
+                        </>
+                      ) : null}
                       {quote.direction === "buy" ? (
                         <>
                           <dt>Donation (1.45% USDC)</dt>
@@ -954,7 +1010,10 @@ export function App() {
                       )}
                       <dt>
                         You receive (
-                        {settlement === "claims" && quote.direction === "buy" ? "claims" : "mUSDC"})
+                        {settlement === "claims" && quote.direction === "buy"
+                          ? "claims"
+                          : quote.tokenOutSymbol}
+                        )
                       </dt>
                       <dd className="quote-net">
                         {formatBal(quote.amountOut)}{" "}
@@ -992,6 +1051,7 @@ export function App() {
                 onClick={() => void onSwap()}
               >
                 {direction === "buy" ? "Buy" : "Sell"}
+                {exactness === "exactOut" ? " exact out" : ""}
                 {settlement === "claims" ? " (claims)" : ""}
               </button>
             </div>

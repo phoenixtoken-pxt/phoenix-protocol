@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/contracts.ts","./src/main.tsx","./src/vite-env.d.ts","./src/components/PriceChart.tsx","./src/hooks/useSpotPrice.ts","./src/lib/anvilWallet.ts","./src/lib/format.ts","./src/lib/lpFees.ts","./src/lib/providers.ts","./src/lib/quoteV4.ts","./src/lib/spotPrice.ts","./src/lib/swapV4.ts","./src/lib/warpTime.ts"],"version":"5.9.3"}

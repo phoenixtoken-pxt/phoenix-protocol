@@ -19,6 +19,9 @@ export type SwapDirection = "buy" | "sell";
 /** How PoolSwapTest settles / takes the trader's leg. */
 export type SettlementMode = "wallet" | "claims";
 
+/** Exact-in: amount is what you pay. Exact-out: amount is the specified output (RIFM). */
+export type SwapExactness = "exactIn" | "exactOut";
+
 export type PoolKeyStruct = {
   currency0: string;
   currency1: string;
@@ -123,6 +126,64 @@ export async function swapExactIn(
     {
       zeroForOne: zfo,
       amountSpecified: -amountIn,
+      sqrtPriceLimitX96: zfo ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n,
+    },
+    {
+      takeClaims: useClaims && direction === "buy",
+      settleUsingBurn: useClaims && direction === "sell",
+    },
+    hookData,
+  );
+  const receipt = await tx.wait();
+  return receipt.hash as string;
+}
+
+/**
+ * Exact-out swap via PoolSwapTest (positive amountSpecified = tokens the trader wants).
+ * `payAmount` is the quoted input (USDC on buy, PXT on sell) for mint/approve.
+ */
+export async function swapExactOut(
+  signer: Signer,
+  direction: SwapDirection,
+  specifiedOut: bigint,
+  payAmount: bigint,
+  settlement: SettlementMode = "wallet",
+): Promise<string> {
+  const trader = await signer.getAddress();
+  const key = buildPoolKey();
+  const zfo = zeroForOne(direction, key);
+  const useClaims = settlement === "claims";
+
+  if (direction === "buy") {
+    await ensureQuoteBalance(trader, payAmount);
+    const musdc = new Contract(config.quote, ERC20_ABI, signer);
+    const allowance = (await musdc.allowance(trader, config.poolSwapTest)) as bigint;
+    if (allowance < payAmount) {
+      await (await musdc.approve(config.poolSwapTest, MaxUint256)).wait();
+    }
+  } else if (useClaims) {
+    const claims = await readPxtClaimBalance(trader);
+    if (claims < payAmount) {
+      throw new Error(
+        `Not enough PXT claims: need ${payAmount.toString()}, have ${claims.toString()}. Buy with “Receive as claims” first.`,
+      );
+    }
+    await ensurePoolSwapOperator(signer);
+  } else {
+    const pxt = new Contract(config.pxt, ERC20_ABI, signer);
+    const allowance = (await pxt.allowance(trader, config.poolSwapTest)) as bigint;
+    if (allowance < payAmount) {
+      await (await pxt.approve(config.poolSwapTest, MaxUint256)).wait();
+    }
+  }
+
+  const swapTest = new Contract(config.poolSwapTest, POOL_SWAP_TEST_ABI, signer);
+  const hookData = AbiCoder.defaultAbiCoder().encode(["address"], [trader]);
+  const tx = await swapTest.swap(
+    key,
+    {
+      zeroForOne: zfo,
+      amountSpecified: specifiedOut,
       sqrtPriceLimitX96: zfo ? MIN_SQRT_PRICE + 1n : MAX_SQRT_PRICE - 1n,
     },
     {
