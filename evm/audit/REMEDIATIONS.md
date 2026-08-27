@@ -480,3 +480,26 @@ No transfer-window inheritance (`noteWalletTransfer`), inbound cooldown, or cros
 ### Residual risk
 
 Determined actors can chain split → sell 10% → transfer → repeat to liquidate over time at base tier plus transfer tax. Single-address dumps **>10% in 24h** remain penalized. See also **FWEPE** (calendar boundary within one address).
+
+---
+
+## IDUT — Incorrect Default Unlock Timestamp
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PxtFeeModel.sol` `DEFAULT_SELL_UNLOCK_TIMESTAMP`; `BootstrapReturnDeltaFork.s.sol` |
+| **Our status** | Resolved |
+| **Code** | Working tree |
+
+### Finding
+
+`DEFAULT_SELL_UNLOCK_TIMESTAMP` was documented as **2027-03-01 00:00:00 UTC** but set to `1_803_744_000` (**2027-02-27 16:00 UTC**), 32 hours early. Bootstrap used that default when `SELL_UNLOCK_TIMESTAMP` was unset; `Pxt` stores the value immutably at deploy.
+
+### What we shipped
+
+Corrected constant to `1_803_859_200` (true **2027-03-01 00:00:00 UTC**). Regression test: `test_default_sell_unlock_matches_documented_utc` in `Pxt.t.sol`.
+
+### Residual risk
+
+Production deploy must pass the intended unlock at constructor time (immutable). `write-anvil-session.sh` already computed the correct date via `date`; only the Solidity fallback was wrong.
