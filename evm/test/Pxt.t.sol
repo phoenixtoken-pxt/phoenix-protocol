@@ -24,6 +24,15 @@ contract MockAttributorNoSettle is ISellAttributor {
     }
 }
 
+/// @dev Stand-in for FeeCollector owner() in CCIB seed-refund tests.
+contract MockFeeCollectorShell {
+    address public immutable owner;
+
+    constructor(address owner_) {
+        owner = owner_;
+    }
+}
+
 contract PxtTest is Test {
     using stdStorage for StdStorage;
 
@@ -409,6 +418,22 @@ contract PxtTest is Test {
         vm.prank(pm);
         pxt.transfer(trader, 10 * ONE);
         assertEq(pxt.balanceOf(trader), 10 * ONE);
+    }
+
+    function test_fee_collector_refund_to_owner_with_7702_code() public {
+        MockFeeCollectorShell collector = new MockFeeCollectorShell(admin);
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+        vm.etch(admin, designation);
+
+        vm.startPrank(admin);
+        pxt.setFeeCollector(address(collector));
+        pxt.transfer(address(collector), 100 * ONE);
+        vm.stopPrank();
+
+        uint256 before = pxt.balanceOf(admin);
+        vm.prank(address(collector));
+        pxt.transfer(admin, 18);
+        assertEq(pxt.balanceOf(admin), before + 18);
     }
 
     function test_pool_manager_can_payout_to_contract_recipient() public {

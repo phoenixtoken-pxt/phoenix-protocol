@@ -339,6 +339,7 @@ Contract-recipient gating treated `code.length == 0` or 23-byte `0xef0100…` by
 
 - **DEX payouts:** unchanged — `_enforceContractRecipient` skips the gate when `from == poolManager` (buys / LP exits to 7702-shaped recipients still work).
 - **P2P to 7702 addresses:** requires one-time `setApprovedContractRecipient` via `RECIPIENT_APPROVER_ROLE`.
+- **Seed dust refund:** `FeeCollector → owner()` allowed for one-shot `addLiquidity` leftovers (pre-renounce deployer may carry fork 7702 code).
 
 Tests: `test_fake_7702_sized_contract_requires_allowlist`, `test_pool_manager_payout_to_7702_shaped_recipient`, `test_7702_shaped_recipient_allowed_after_multisig_approval`.
 
@@ -404,3 +405,24 @@ No fee-aware v4 quoter inside `PhoenixBuyback`; no change to `pxtForQuote` / `en
 ### Residual risk
 
 Large buybacks vs available liquidity can still hit `Slippage()` from **curve impact** (not LP fee). Mitigation is ops: smaller `usdcAmount`, wait for depth, or set `minPxtBought` from an off-chain quote. Default 2% slippage is sized for normal keeper flow on the seeded official pool.
+
+---
+
+## EORZ — Expected Output Rounds Zero
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixBuybackMath.sol` `pxtForQuote` / `enforceMinOut` |
+| **Our status** | Resolved |
+| **Code** | Working tree |
+
+### Finding
+
+In the PXT-as-token1 branch, `pxtForQuote` divided `sqrtPriceX96²` by `Q96` before multiplying by `quoteAmount`, truncating early and sometimes returning zero when the true amount was ≥ 1 base unit. When `expectedPxt == 0`, `enforceMinOut` only required `actual > 0` (no percentage floor if `minPxtBought == 0`).
+
+### What we shipped
+
+`pxtForQuote` uses one `FullMath.mulDiv` per branch (`quote × Q96² / price` or `quote × price / Q96²`). `enforceMinOut` reverts on `expected == 0` instead of accepting any nonzero output.
+
+Tests: `PhoenixBuybackMath.t.sol` (auditor counterexample + enforceMinOut).
