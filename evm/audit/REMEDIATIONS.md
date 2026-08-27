@@ -159,3 +159,26 @@ One-shot seed removes the owner sweep. `collect` pays wallets/burn only from `ba
 ### Residual risk
 
 On a short collector, unpaid donation/marketing is written off so buyback cash is not donated. Surplus tokens above all pendings are unused (not auto-assigned).
+
+---
+
+## FBBP — Flash-Borrowed Balance Bypasses Penalty
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixV4ReturnDeltaHook` dump window (`balanceAtWindowStart`) |
+| **Our status** | Resolved |
+| **Code** | Working tree (`creditFromPoolManager` + snapshot ratchet) |
+
+### Finding
+
+The 10% dump denominator was `balanceOf + this sell` on the first sale, then frozen for 24h. Same-tx PXT taken from the PoolManager inflated that snapshot. Repaying it was a transfer to the PoolManager with no pending skim, so it did not add to `soldInWindow`. Later sells could dump the real bag at 5.4%.
+
+### What we shipped
+
+`Pxt._update` notifies the hook on PoolManager→user receipts (`creditFromPoolManager`, transient). `attributeSell` uses `balance − sameTxFromPm`. An open window’s `balanceAtWindowStart` ratchets down when `effectiveBefore` is smaller.
+
+### Residual risk
+
+Same-tx buy/LP-exit PXT is also excluded (stricter). If they repay the flash *before* the sell in the same tx, the denominator can collapse to this sell size (always penalty) — conservative.

@@ -40,6 +40,8 @@ import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeMod
 // Dump window
 // Large sells take a pessimistic USDC skim up front. The authentic seller reclaiming via
 // `Pxt.attributeSell` gets a rebate to the fair fee; unclaimed skims finalize as orphan fees.
+// Same-tx PoolManager receipts (flash take) are excluded from the 10% denominator (FBBP).
+// An open window's snapshot ratchets down if holdings drop.
 //
 // Same-tx safety
 // While an ERC-20 sell skim is pending in transient storage, further swaps are blocked and
@@ -75,6 +77,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     bytes32 private constant _T_USDC_OUT = keccak256("phoenix.rd.pending.usdcOut");
     bytes32 private constant _T_USDC_SKIM = keccak256("phoenix.rd.pending.usdcSkim");
     bytes32 private constant _T_QUOTE = keccak256("phoenix.rd.pending.quote");
+    /// @dev keccak256(abi.encode(_T_PM_IN, account)) → PXT received from PoolManager this tx.
+    bytes32 private constant _T_PM_IN = keccak256("phoenix.rd.pmIn");
 
     /// @notice Persistent skim awaiting attributeSell or finalizeOrphanedSell (ERC-6909).
     struct OrphanSkim {
@@ -226,6 +230,15 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     }
 
     /// @inheritdoc ISellAttributor
+    function creditFromPoolManager(address account, uint256 amount) external {
+        if (msg.sender != address(pxt)) revert OnlyPxt();
+        if (account == address(0) || amount == 0) return;
+        if (address(feeCollector) != address(0) && account == address(feeCollector)) return;
+        bytes32 slot = _pmInSlot(account);
+        _tstore(slot, _tload(slot) + amount);
+    }
+
+    /// @inheritdoc ISellAttributor
     function attributeSell(address seller, uint256 pxtAmount) external {
         if (msg.sender != address(pxt)) revert OnlyPxt();
         uint256 pendingPxt = _tload(_T_PXT_IN);
@@ -239,8 +252,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
 
         _clearPendingSkim();
 
-        // balanceAfter settlement + sold amount = pre-sell balance.
-        uint256 balanceBefore = pxt.balanceOf(seller) + pxtAmount;
+        uint256 balanceBefore = _effectiveSellBalance(seller, pxtAmount);
         uint256 fairBps = _fairSellFeeBps(seller, pxtAmount, balanceBefore);
         _applySellWindow(seller, pxtAmount, balanceBefore);
 
@@ -490,6 +502,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         }
 
         uint256 newSold = soldInWindow + amount;
+        if (balanceAtStart > balanceBefore) balanceAtStart = balanceBefore;
         bool penalized =
             balanceAtStart > 0 && newSold * PxtFeeModel.BPS > balanceAtStart * PxtFeeModel.PENALTY_THRESHOLD_BPS;
         return penalized ? PxtFeeModel.PENALTY_FEE_BPS : PxtFeeModel.SELL_FEE_BPS;
@@ -504,8 +517,22 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             window.windowStart = uint64(block.timestamp);
             window.soldInWindow = 0;
             window.balanceAtWindowStart = balanceBefore;
+        } else if (balanceBefore < window.balanceAtWindowStart) {
+            window.balanceAtWindowStart = balanceBefore;
         }
         window.soldInWindow += amount;
+    }
+
+    /// @dev Pre-sell holdings excluding PXT received from PoolManager in this transaction (FBBP).
+    function _effectiveSellBalance(address seller, uint256 pxtAmount) internal view returns (uint256) {
+        uint256 raw = pxt.balanceOf(seller) + pxtAmount;
+        uint256 fromPm = _tload(_pmInSlot(seller));
+        if (raw > fromPm) return raw - fromPm;
+        return pxtAmount;
+    }
+
+    function _pmInSlot(address account) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_T_PM_IN, account));
     }
 
     function _enforceOfficialPool(PoolKey calldata key) internal view {

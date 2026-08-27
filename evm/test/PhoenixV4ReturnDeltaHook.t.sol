@@ -746,6 +746,66 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(pendBb, (usdcOutGross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS);
     }
 
+    /// @dev Same-tx PoolManager→seller PXT (flash take) must not inflate the dump-window snapshot.
+    function test_dump_window_excludes_same_tx_pool_manager_credit() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        uint256 flash = 1_000_000 * WHOLE;
+        vm.prank(admin);
+        pxt.transfer(address(manager), flash);
+
+        uint256 aliceBefore = pxt.balanceOf(alice);
+        vm.prank(address(manager));
+        pxt.transfer(alice, flash);
+
+        _sell(alice, 1 * WHOLE);
+        (,, uint256 snap) = hook.sellWindows(alice);
+        assertEq(snap, aliceBefore);
+    }
+
+    /// @dev After holdings drop, later sells use the smaller bag (not the first-sale snapshot).
+    function test_dump_window_ratchets_down_when_balance_drops() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        _sell(alice, 1 * WHOLE);
+        (,, uint256 snap0) = hook.sellWindows(alice);
+        assertGt(snap0, 50_000 * WHOLE);
+
+        address buddy = makeAddr("dumpBuddy");
+        uint256 sendOut = 80_000 * WHOLE;
+        vm.prank(alice);
+        pxt.transfer(buddy, sendOut);
+
+        uint256 aliceLeft = pxt.balanceOf(alice);
+        uint256 secondSell = (aliceLeft * 15) / 100;
+        assertGt(secondSell, 0);
+        // 15% of remaining is still << 10% of the original ~100k snapshot.
+        assertLt(secondSell * PxtFeeModel.BPS, snap0 * PxtFeeModel.PENALTY_THRESHOLD_BPS);
+
+        (uint256 don0, uint256 mkt0,, uint256 bb0) = feeCollector.pending(address(musdc));
+        uint256 aliceMusdcBefore = musdc.balanceOf(alice);
+        _sell(alice, secondSell);
+
+        (,, uint256 snap1) = hook.sellWindows(alice);
+        assertEq(snap1, aliceLeft);
+
+        (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
+        uint256 usdcSkimmed = (pendDon - don0) + (pendMkt - mkt0) + (pendBb - bb0);
+        uint256 usdcOutGross = musdc.balanceOf(alice) - aliceMusdcBefore + usdcSkimmed;
+        uint256 expectBb =
+            (usdcOutGross * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS
+            - (usdcOutGross * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS
+            - (usdcOutGross * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
+        assertEq(pendBb - bb0, expectBb);
+        assertGt(pendBb - bb0, (usdcOutGross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS);
+    }
+
     /// @dev Exact-out settle is swapPxt + burn; attribution must use that size (not swap-only).
     function test_exact_out_sell_attributes_and_burns() public {
         vm.prank(admin);
