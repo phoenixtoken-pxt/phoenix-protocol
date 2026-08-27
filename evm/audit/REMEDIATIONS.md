@@ -296,3 +296,24 @@ No global pool ban, no “every `user → PoolManager` must be an official-hook 
 ### Residual risk
 
 Users can trade thin alternate pools at lower all-in cost. Mitigation is liquidity + routing on the official pool, not on-chain pool enumeration.
+
+---
+
+## UBFS — Unspent Buyback Funds Stranded
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixBuyback.sol` `_executeBuybackCash` / `unlockCallback` |
+| **Our status** | Resolved |
+| **Code** | Working tree |
+
+### Finding
+
+Cash buyback debited the full requested `spend` from `pendingBuyback` and reported `usdcSpent = spend`, but the v4 swap can stop at `sqrtPriceLimitX96` with a partial fill. Only `quoteOwed` from the swap delta is settled — the rest stayed on the collector while accounting treated it as spent.
+
+### What we shipped
+
+`unlockCallback` returns actual `quoteSpent`; `_executeBuybackCash` sets `usdcSpent` and reduces `pendingBuyback` by that amount. Min-out sizing uses the filled USDC, not the requested budget.
+
+Test: `test_buyback_partial_fill_keeps_pending` (tight slippage → partial fill, pending matches actual spend).

@@ -1122,6 +1122,31 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(feeCollector.recyclePxt(), 0);
     }
 
+    /// @dev Price-limit partial fill must debit pending by actual USDC spent, not requested budget.
+    function test_buyback_partial_fill_keeps_pending() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        vm.warp(sellUnlock);
+        _clearAntiBot();
+        _sell(antiBot, 1 * WHOLE);
+        _sell(alice, 100_000 * WHOLE);
+        feeCollector.collect();
+        (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
+        assertGt(pendBb, 100 * WHOLE);
+
+        vm.prank(admin);
+        feeCollector.setBuybackParams(10, 1);
+
+        _rollBuybackRef();
+        (uint256 spent,) = feeCollector.executeBuyback(0, 0, block.timestamp + 1);
+        (,,, uint256 pendAfter) = feeCollector.pending(address(musdc));
+
+        assertGt(spent, 0);
+        assertLt(spent, pendBb);
+        assertEq(pendAfter, pendBb - spent);
+        assertGt(pendAfter, 0);
+    }
+
     /// @dev Protocol buyback must not re-accrue the 2.7% buy skim (FeeCollector is swap sender).
     function test_buyback_skips_hook_buy_fee() public {
         vm.prank(admin);
