@@ -10,7 +10,8 @@ import {IPxtSellControls, PxtSellAccess} from "./PxtSellAccess.sol";
 import {ISellAttributor} from "../return-delta/ISellAttributor.sol";
 
 // Fee-on-transfer ERC20. Wallet transfers take 2.7% unless the recipient is FeeExempt
-// or NoPenalty (or the transfer is PoolManager settlement).
+// or NoPenalty. PoolManager *outbound* (buys / LP exits) is fee-free. User→PoolManager is
+// fee-free only for attested DEX sells and LP mints, plus FeeCollector/owner seed (PTTB).
 //
 // DEX sell settlement (user -> PoolManager) is authenticated by token custody:
 // - Sell lock + anti-bot first seller are enforced here.
@@ -39,7 +40,8 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
     address public immutable DONATION_WALLET;
     address public immutable MARKETING_WALLET;
 
-    /// @notice Uniswap v4 PoolManager - transfers to/from this address skip the 2.7% fee.
+    /// @notice Uniswap v4 PoolManager. Outbound settlement skips the 2.7% fee; inbound
+    ///         is fee-free only for attested DEX sells / LP mints (or collector/owner seed).
     address public poolManager;
 
     /// @notice First post-unlock seller; address(0) disables anti-bot.
@@ -238,22 +240,40 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
         _enforceContractRecipient(from, to);
 
-        // DEX sell settlement: authentic seller = `from`.
+        // DEX sell / LP settle: authentic sender = `from`. Naked hops pay the 2.7% tax (PTTB).
         if (poolManager != address(0) && to == poolManager && from != poolManager) {
             // LP settle (not a user sell): FeeCollector anytime (seed/recycle); Ownable admin only
             // before sell unlock so deploy can seed then renounce. After renounce owner==0.
             bool collectorSettle = feeCollector != address(0) && from == feeCollector;
             bool ownerSeedBeforeUnlock = from == owner() && block.timestamp < SELL_UNLOCK_TIMESTAMP;
             if (collectorSettle || ownerSeedBeforeUnlock) {
+                if (address(sellAttributor) != address(0)) {
+                    sellAttributor.consumeLpInbound(amount);
+                }
                 super._update(from, to, amount);
                 return;
             }
 
-            // Every other sender (including FeeExempt) must pass sell lock + anti-bot.
-            _enforceSellAccess(from);
-            super._update(from, to, amount);
-            _onDexSell(from, amount);
-            return;
+            if (address(sellAttributor) != address(0)) {
+                uint256 pendingSell = sellAttributor.pendingDexSellAmount();
+                if (pendingSell != 0) {
+                    // Real DEX sell, or a mismatched settle that must revert in attributeSell.
+                    _enforceSellAccess(from);
+                    super._update(from, to, amount);
+                    _onDexSell(from, amount);
+                    return;
+                }
+                if (sellAttributor.consumeLpInbound(amount)) {
+                    super._update(from, to, amount);
+                    return;
+                }
+                // Fall through: 2.7% wallet tax.
+            } else {
+                _enforceSellAccess(from);
+                super._update(from, to, amount);
+                _onDexSell(from, amount);
+                return;
+            }
         }
 
         FeeBreakdown memory fee = _quoteTransfer(from, to, amount);
@@ -296,7 +316,7 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         view
         returns (FeeBreakdown memory breakdown)
     {
-        if (poolManager != address(0) && (from == poolManager || to == poolManager)) {
+        if (poolManager != address(0) && from == poolManager) {
             return PxtFeeModel.noFee(amount);
         }
 

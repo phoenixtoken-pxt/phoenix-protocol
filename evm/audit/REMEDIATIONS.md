@@ -182,3 +182,32 @@ The 10% dump denominator was `balanceOf + this sell` on the first sale, then fro
 ### Residual risk
 
 Same-tx buy/LP-exit PXT is also excluded (stricter). If they repay the flash *before* the sell in the same tx, the denominator can collapse to this sell size (always penalty) — conservative.
+
+---
+
+## PTTB — PoolManager Transfer Tax Bypass
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `Pxt._quoteTransfer` / user→PoolManager |
+| **Our status** | Resolved |
+| **Code** | Working tree (`pendingDexSellAmount` / `consumeLpInbound`) |
+
+### Finding
+
+Every `user → PoolManager` transfer skipped the 2.7% wallet tax (treated as a DEX sell). `attributeSell` no-ops when there is no pending skim. After unlock, a locker could transfer PXT onto the PoolManager and `take` it to a friend tax-free.
+
+### What we shipped
+
+Fee-free inbound only when the hook attests it:
+
+- DEX sell: `afterSwap` has already stored `pendingDexSellAmount` (including zero-USDC-skim sells).
+- LP mint: `afterAddLiquidity` reserves the PXT owed; `consumeLpInbound` spends that budget.
+- FeeCollector / owner seed before unlock stay fee-free.
+
+Anything else `to == poolManager` pays the 2.7% transfer tax. `from == poolManager` (buys / LP exits) stays fee-free.
+
+### Residual risk
+
+Flash repay (`user → PoolManager` with no pending sell) pays 2.7% — conservative. Public LP after sell-unlock is not a sell, so it no longer requires anti-bot clear. A leftover LP inbound budget cannot cover a larger hop (amount-bounded). `setPoolManager` remains rotatable until Ownable is renounced.
