@@ -104,7 +104,7 @@ export const HOOK_ABI = [
   "function feeCollector() view returns (address)",
   // Dump window lives on the hook.
   "function sellWindows(address) view returns (uint64 windowStart, uint256 soldInWindow, uint256 balanceAtWindowStart)",
-  "function orphanSkim() view returns (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote)",
+  "function orphanSkim() view returns (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote, bool feeOnNet)",
   "function finalizeOrphanedSell()",
   "event HookFeeCharged(address indexed trader, uint8 kind, uint256 feeBps, uint256 feeAmount)",
   "event SellProtectionCleared()",

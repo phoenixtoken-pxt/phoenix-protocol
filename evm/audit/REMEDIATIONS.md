@@ -211,3 +211,34 @@ Anything else `to == poolManager` pays the 2.7% transfer tax. `from == poolManag
 ### Residual risk
 
 Flash repay (`user → PoolManager` with no pending sell) pays 2.7% — conservative. Public LP after sell-unlock is not a sell, so it no longer requires anti-bot clear. A leftover LP inbound budget cannot cover a larger hop (amount-bounded). `setPoolManager` remains rotatable until Ownable is renounced.
+
+---
+
+## RIFM — Requested Input Fee Mispricing
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixV4ReturnDeltaHook` `beforeSwap` / `afterSwap` |
+| **Our status** | Resolved |
+| **Code** | Working tree (`grossUp`, exact-in true-up, exact-out fee-on-net) |
+
+### Finding (two halves)
+
+1. **Exact-in.** Fees and the 1.85% PXT burn were sized from `amountSpecified` in `beforeSwap`. A price-limit partial fill still paid as if the full request had traded.
+
+2. **Exact-out.** Buy/sell USDC skims (and the unspecified PXT burn) were `net × bps / 10000` added on top of the pool leg. Published 2.7% / 5.4% / 37.8% therefore applied to *net*, not to total flow (auditor example: dump USDC ~26.44% of output instead of 35.95% of gross).
+
+### What we shipped
+
+`PxtFeeModel.grossUp(net, bps)` = `net * bps / (BPS - bps)`, so `fee / (net + fee)` matches the published bps (floor).
+
+**Exact-in.** `beforeSwap` still takes a pessimistic specified slice (1.85% PXT / 2.7% USDC of the *request*) so the pool can fill. Uniswap v4 freezes specified hook delta after `beforeSwap`, so the user still *settles* that slice. `afterSwap` burns/accrues `grossUp(filled pool leg)`. Unfilled PXT burn is refunded to the authentic seller in `attributeSell` (fee-free hook outbound). Unfilled buy USDC is booked as extra buyback (no buyer identity on the hook). Full-fill sells match the old `request * bps / BPS` burn.
+
+**Exact-out.** Specified notional stays the user's net. USDC skim (and buy unspecified take) is `grossUp` of that net at the published USDC/buy bps. Sell attribution stores `feeOnNet` so rebate/orphan splits gross-up the same net, not a pre-grossed figure (that would mis-rebate). Exact-in USDC sell skim stays `% of pool output` (`feeOnNet = false`).
+
+Tests: `test_exact_in_sell_partial_fill_burns_actual`, `test_exact_out_buy_grosses_up_usdc_fee`, exact-out sell/penalty pending vs grossed notional, `PxtFeeModel` `grossUp` unit/fuzz.
+
+### Residual risk
+
+Floor division can leave 1 wei vs a naive `gross * bps / BPS`. Exact-in specified payment cannot be reduced in `afterSwap`; sell PXT leftover is refunded in `attributeSell`, exact-in buy leftover has no authentic buyer and is accrued as buyback. ERC-6909 exact-in partial fills never hit `attributeSell`, so leftover PXT can sit on the hook until a later flow. Hook outbound PXT is fee-free.

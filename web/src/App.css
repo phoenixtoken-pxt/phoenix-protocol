@@ -462,6 +462,11 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.quote-kv dd.quote-was {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
 .quote-kv dd.quote-net {
   font-family: var(--display);
   font-size: 1.2rem;

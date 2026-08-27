@@ -473,7 +473,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         );
         vm.stopPrank();
 
-        (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote) = hook.orphanSkim();
+        (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote,) = hook.orphanSkim();
         assertGt(usdcSkim, 0);
         assertEq(quote, address(musdc));
         assertGt(pxtIn, 0);
@@ -484,7 +484,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
 
         hook.finalizeOrphanedSell();
 
-        (,, uint128 skimLeft,) = hook.orphanSkim();
+        (,, uint128 skimLeft,,) = hook.orphanSkim();
         assertEq(skimLeft, 0);
         assertEq(musdc.balanceOf(address(hook)), hookUsdcBefore);
         (,,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
@@ -507,7 +507,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.expectRevert();
         probe.attack(key, params, abi.encode(alice), PendingSellUnlockProbe.AfterFirst.SecondSwap);
 
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0); // whole unlock reverted — no leftover orphan
     }
 
@@ -526,7 +526,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.expectRevert();
         probe.attack(key, params, abi.encode(alice), PendingSellUnlockProbe.AfterFirst.Finalize);
 
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0);
     }
 
@@ -544,7 +544,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceUsdcBefore);
         (,,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
         assertEq(pendBbAfter, pendBbBefore);
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0);
     }
 
@@ -846,9 +846,11 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceMusdcBefore);
 
         (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
-        uint256 expectDon = (usdcOut * PxtFeeModel.SELL_DONATION_BPS) / PxtFeeModel.BPS;
-        uint256 expectMkt = (usdcOut * PxtFeeModel.SELL_MARKETING_BPS) / PxtFeeModel.BPS;
-        uint256 expectBb = (usdcOut * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
+        uint256 gross =
+            usdcOut + (usdcOut * PxtFeeModel.SELL_USDC_FEE_BPS) / (PxtFeeModel.BPS - PxtFeeModel.SELL_USDC_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.SELL_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.SELL_MARKETING_BPS) / PxtFeeModel.BPS;
+        uint256 expectBb = (gross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
         assertEq(pendDon, expectDon);
         assertEq(pendMkt, expectMkt);
         assertEq(pendBb, expectBb);
@@ -869,12 +871,17 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceMusdcBefore);
 
         (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
-        uint256 expectDon = (usdcOut * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS;
-        uint256 expectMkt = (usdcOut * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
-        uint256 expectBb = (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
+        uint256 gross =
+            usdcOut + (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS)
+            / (PxtFeeModel.BPS - PxtFeeModel.PENALTY_USDC_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
+        uint256 expectBb = (gross * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
         assertEq(pendDon, expectDon);
         assertEq(pendMkt, expectMkt);
         assertEq(pendBb, expectBb);
+        // Published 35.95% of total USDC flow, not 35.95% of the net exact-out (RIFM).
+        assertGt(pendDon + pendMkt + pendBb, (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS);
     }
 
     function test_exact_out_fee_exempt_refunds_usdc_still_burns() public {
@@ -898,6 +905,81 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(pendDon, 0);
         assertEq(pendMkt, 0);
         assertEq(pendBb, 0);
+    }
+
+    /// @dev Exact-in sell at a tight limit must burn/fee the fill, not the requested size (RIFM).
+    function test_exact_in_sell_partial_fill_burns_actual() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        vm.startPrank(admin);
+        pxt.setWalletStatus(alice, Pxt.WalletStatus.FeeExempt);
+        pxt.transfer(alice, 5_000_000 * WHOLE);
+        pxt.setWalletStatus(alice, Pxt.WalletStatus.Normal);
+        vm.stopPrank();
+
+        uint256 request = 5_000_000 * WHOLE;
+        uint256 requestBurn = (request * PxtFeeModel.SELL_BURN_BPS) / PxtFeeModel.BPS;
+        uint256 supplyBefore = pxt.totalSupply();
+        uint256 aliceBefore = pxt.balanceOf(alice);
+
+        bool zeroForOne = Currency.unwrap(key.currency0) == address(pxt);
+        (, int24 tick,,) = manager.getSlot0(key.toId());
+        int24 limitTick = zeroForOne ? tick - TICK_SPACING : tick + TICK_SPACING;
+        uint160 limit = TickMath.getSqrtPriceAtTick(limitTick);
+
+        vm.startPrank(alice);
+        IERC20(address(pxt)).approve(address(swapRouter), type(uint256).max);
+        swapRouter.swap(
+            key,
+            SwapParams({zeroForOne: zeroForOne, amountSpecified: -request.toInt256(), sqrtPriceLimitX96: limit}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            abi.encode(alice)
+        );
+        vm.stopPrank();
+
+        uint256 burned = supplyBefore - pxt.totalSupply();
+        uint256 spent = aliceBefore - pxt.balanceOf(alice);
+        assertLt(spent, request);
+        assertLt(burned, requestBurn);
+        uint256 poolPxt = spent - burned;
+        assertEq(burned, (poolPxt * PxtFeeModel.SELL_BURN_BPS) / (PxtFeeModel.BPS - PxtFeeModel.SELL_BURN_BPS));
+    }
+
+    /// @dev Exact-out buy: 2.7% of total USDC paid, not 2.7% of the pool leg (RIFM).
+    function test_exact_out_buy_grosses_up_usdc_fee() public {
+        uint256 pxtOut = 1_000 * WHOLE;
+        uint256 aliceMusdcBefore = musdc.balanceOf(alice);
+        uint256 alicePxtBefore = pxt.balanceOf(alice);
+
+        bool zeroForOne = Currency.unwrap(key.currency0) == address(musdc);
+        vm.startPrank(alice);
+        musdc.approve(address(swapRouter), type(uint256).max);
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: pxtOut.toInt256(),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            abi.encode(alice)
+        );
+        vm.stopPrank();
+
+        uint256 usdcPaid = aliceMusdcBefore - musdc.balanceOf(alice);
+        (uint256 pendDon, uint256 pendMkt,,) = feeCollector.pending(address(musdc));
+        uint256 fee = pendDon + pendMkt;
+        uint256 poolUsdc = usdcPaid - fee;
+        uint256 gross = poolUsdc + (poolUsdc * PxtFeeModel.BUY_FEE_BPS) / (PxtFeeModel.BPS - PxtFeeModel.BUY_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.BUY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.BUY_FEE_BPS) / PxtFeeModel.BPS - expectDon;
+        assertEq(pendDon, expectDon);
+        assertEq(pendMkt, expectMkt);
+        assertGt(fee, (poolUsdc * PxtFeeModel.BUY_FEE_BPS) / PxtFeeModel.BPS);
+        assertEq(pxt.balanceOf(alice), alicePxtBefore + pxtOut);
     }
 
     function test_unauthorized_buyback_reverts() public {

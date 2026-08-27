@@ -6,6 +6,10 @@ import {PxtFeeModel} from "../src/core/PxtFeeModel.sol";
 
 /// @dev Exposes internal library splits for unit / fuzz checks.
 contract PxtFeeModelHarness {
+    function grossUp(uint256 net, uint256 bps) external pure returns (uint256) {
+        return PxtFeeModel.grossUp(net, bps);
+    }
+
     function splitBuy(uint256 amount) external pure returns (uint256 donation, uint256 marketing) {
         return PxtFeeModel.splitBuy(amount);
     }
@@ -28,6 +32,24 @@ contract PxtFeeModelTest is Test {
 
     function setUp() public {
         harness = new PxtFeeModelHarness();
+    }
+
+    function test_grossUp_penalty_exceeds_net_times_bps() public view {
+        uint256 net = 100_000_000;
+        uint256 fee = harness.grossUp(net, PxtFeeModel.PENALTY_USDC_FEE_BPS);
+        assertEq(fee, (net * PxtFeeModel.PENALTY_USDC_FEE_BPS) / (PxtFeeModel.BPS - PxtFeeModel.PENALTY_USDC_FEE_BPS));
+        assertGt(fee, (net * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS);
+    }
+
+    function testFuzz_grossUp(uint256 net, uint256 bps) public view {
+        net = bound(net, 0, type(uint128).max);
+        bps = bound(bps, 0, PxtFeeModel.BPS - 1);
+        uint256 fee = harness.grossUp(net, bps);
+        if (bps == 0 || net == 0) {
+            assertEq(fee, 0);
+            return;
+        }
+        assertEq(fee, (net * bps) / (PxtFeeModel.BPS - bps));
     }
 
     function test_splitBuy_legs_sum_to_buy_fee() public view {

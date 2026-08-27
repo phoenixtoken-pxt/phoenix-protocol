@@ -154,7 +154,7 @@ contract ProtocolAccountingHandler is Test {
     }
 
     function finalizeOrphan() external {
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         if (skim == 0) return;
         hook.finalizeOrphanedSell();
     }
@@ -299,7 +299,7 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
     }
 
     function invariant_hook_usdc_covers_orphan_skim() public view {
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertGe(musdc.balanceOf(address(hook)), uint256(skim));
     }
 

@@ -2,10 +2,11 @@ import { AbiCoder, Contract } from "ethers";
 import { HOOK_ABI, PXT_ABI, STATE_VIEW_ABI, config } from "../contracts";
 import { formatSpot, musdcPerPxt, poolIdFromKey } from "./spotPrice";
 import { readProvider } from "./providers";
-import { buildPoolKey, zeroForOne, type SettlementMode, type SwapDirection } from "./swapV4";
+import { buildPoolKey, zeroForOne, type SettlementMode, type SwapDirection, type SwapExactness } from "./swapV4";
 
 const QUOTER_ABI = [
   "function quoteExactInputSingle(((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) poolKey,bool zeroForOne,uint128 exactAmount,bytes hookData) params) returns (uint256 amountOut, uint256 gasEstimate)",
+  "function quoteExactOutputSingle(((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) poolKey,bool zeroForOne,uint128 exactAmount,bytes hookData) params) returns (uint256 amountIn, uint256 gasEstimate)",
 ] as const;
 
 const BPS = 10_000n;
@@ -51,8 +52,11 @@ export type SellFeeSplit = {
 
 export type SwapQuote = {
   direction: SwapDirection;
-  /** Exact-in amount sent to the pool. */
+  exactness: SwapExactness;
+  /** Exact-in: you pay this. Exact-out: quoted input (PXT on sell, mUSDC on buy). */
   amountIn: bigint;
+  /** Typed specified amount (input for exact-in, output for exact-out). */
+  specifiedAmount: bigint;
   /** Total PXT leaving the wallet (= amountIn + extraPxtCost). */
   walletPxtOut: bigint;
   /** Spot mUSDC per 1 PXT */
@@ -63,10 +67,14 @@ export type SwapQuote = {
   sellSplit: SellFeeSplit;
   feeBps: bigint;
   feeTier: FeeTier;
-  /** Expected token out after Phoenix tax (USDC for sells). */
+  /** Expected token out after Phoenix tax (and exact-out ERC-20 rebate). */
   amountOut: bigint;
   /** Extra PXT debited beyond amountIn (0 for current hook). */
   extraPxtCost: bigint;
+  /** Exact-out only: old `net × bps / 10000` USDC fee (RIFM undercharge). */
+  legacyFeeUsdc: bigint;
+  /** Exact-out only: USDC fee after gross-up. */
+  nowFeeUsdc: bigint;
   tokenInSymbol: "PXT" | "mUSDC";
   tokenOutSymbol: "PXT" | "mUSDC";
   gasEstimate: bigint;
@@ -98,6 +106,29 @@ async function quoterExactIn(direction: SwapDirection, amountIn: bigint, trader:
     hookData,
   })) as [bigint, bigint];
   return { amountOut, gasEstimate };
+}
+
+async function quoterExactOut(direction: SwapDirection, amountOut: bigint, trader: string): Promise<{
+  amountIn: bigint;
+  gasEstimate: bigint;
+}> {
+  const key = buildPoolKey();
+  const zfo = zeroForOne(direction, key);
+  const hookData = AbiCoder.defaultAbiCoder().encode(["address"], [trader]);
+  const quoter = new Contract(config.quoter, QUOTER_ABI, readProvider);
+  const [amountIn, gasEstimate] = (await quoter.quoteExactOutputSingle.staticCall({
+    poolKey: key,
+    zeroForOne: zfo,
+    exactAmount: amountOut,
+    hookData,
+  })) as [bigint, bigint];
+  return { amountIn, gasEstimate };
+}
+
+/** Fee `f` such that `f / (net + f) == bps / BPS` (exact-out / RIFM). */
+function grossUp(net: bigint, bps: bigint): bigint {
+  if (bps === 0n || net === 0n || bps >= BPS) return 0n;
+  return (net * bps) / (BPS - bps);
 }
 
 /** Invert `net = gross * (BPS - feeBps) / BPS` (floor). */
@@ -281,7 +312,135 @@ export async function quoteExactIn(
     tokenOutSymbol: direction === "buy" ? "PXT" : "mUSDC",
     gasEstimate: netQ.gasEstimate,
     hookMode: "return-delta",
+    exactness: "exactIn",
+    specifiedAmount: amountIn,
+    legacyFeeUsdc: 0n,
+    nowFeeUsdc: 0n,
   };
+}
+
+function usdcSkimBps(tier: FeeTier): bigint {
+  if (tier === "none") return 0n;
+  if (tier === "penalty") return PENALTY_USDC_SKIM_BPS;
+  if (tier === "sell") return SELL_USDC_SKIM_BPS;
+  return 0n;
+}
+
+/**
+ * Exact-out quote. Typed `specifiedOut` is PXT for buys, mUSDC for sells.
+ * USDC fees use gross-up so published bps apply to total flow (RIFM).
+ */
+export async function quoteExactOut(
+  direction: SwapDirection,
+  specifiedOut: bigint,
+  trader: string,
+  settlement: SettlementMode = "wallet",
+): Promise<SwapQuote> {
+  if (specifiedOut <= 0n) throw new Error("Amount must be positive");
+  if (specifiedOut > 2n ** 128n - 1n) throw new Error("Amount exceeds uint128");
+
+  const key = buildPoolKey();
+  const id = poolIdFromKey(key);
+
+  const pxt = new Contract(config.pxt, PXT_ABI, readProvider);
+  const hook = new Contract(config.hook, HOOK_ABI, readProvider);
+  const view = new Contract(config.stateView, STATE_VIEW_ABI, readProvider);
+
+  const [walletStatus, balance, window, slot0, block, inQ] = await Promise.all([
+    pxt.walletStatus(trader) as Promise<number>,
+    pxt.balanceOf(trader) as Promise<bigint>,
+    hook.sellWindows(trader) as Promise<[bigint, bigint, bigint]>,
+    view.getSlot0(id) as Promise<[bigint, number, number, number]>,
+    readProvider.getBlock("latest"),
+    quoterExactOut(direction, specifiedOut, trader),
+  ]);
+
+  const now = block?.timestamp ?? Math.floor(Date.now() / 1000);
+  const spotPrice = musdcPerPxt(slot0[0], key);
+  const status = Number(walletStatus);
+  const extraPxtCost = 0n;
+  const amountIn = inQ.amountIn;
+
+  let feeBps = 0n;
+  let feeTier: FeeTier = "none";
+  let buySplit = EMPTY_BUY_SPLIT;
+  let sellSplit: SellFeeSplit = EMPTY_SELL;
+  let amountOut = specifiedOut;
+  let legacyFeeUsdc = 0n;
+  let nowFeeUsdc = 0n;
+  let grossOut = specifiedOut;
+
+  if (direction === "buy") {
+    feeBps = BUY_FEE_BPS;
+    feeTier = "buy";
+    buySplit = splitBuyFees(amountIn);
+    nowFeeUsdc = buySplit.donationUsdc + buySplit.marketingUsdc;
+    const poolUsdc = amountIn > nowFeeUsdc ? amountIn - nowFeeUsdc : 0n;
+    legacyFeeUsdc = (poolUsdc * BUY_FEE_BPS) / BPS;
+  } else {
+    const claimsForcePenalty = settlement === "claims";
+    const preview = claimsForcePenalty
+      ? { feeBps: PENALTY_FEE_BPS, feeTier: "penalty" as FeeTier }
+      : previewSellFeeBps({
+          walletStatus: status,
+          amountIn,
+          balance,
+          windowStart: window[0],
+          soldInWindow: window[1],
+          balanceAtStart: window[2],
+          now,
+        });
+    feeBps = preview.feeBps;
+    feeTier = preview.feeTier;
+
+    const fairUsdcBps = usdcSkimBps(feeTier);
+    const penGross = specifiedOut + grossUp(specifiedOut, PENALTY_USDC_SKIM_BPS);
+    const fairGross = specifiedOut + grossUp(specifiedOut, fairUsdcBps);
+    sellSplit = splitSell(amountIn, fairGross, feeBps);
+
+    const penSkim = (penGross * PENALTY_USDC_SKIM_BPS) / BPS;
+    nowFeeUsdc =
+      sellSplit.donationUsdc + sellSplit.marketingUsdc + sellSplit.buybackUsdc;
+    legacyFeeUsdc = (specifiedOut * fairUsdcBps) / BPS;
+
+    const rebate = penSkim > nowFeeUsdc ? penSkim - nowFeeUsdc : 0n;
+    amountOut = specifiedOut + rebate;
+    grossOut = penGross;
+  }
+
+  return {
+    direction,
+    exactness: "exactOut",
+    amountIn,
+    specifiedAmount: specifiedOut,
+    walletPxtOut: direction === "sell" ? amountIn + extraPxtCost : 0n,
+    spotPrice,
+    grossOut,
+    buySplit,
+    sellSplit,
+    feeBps,
+    feeTier,
+    amountOut,
+    extraPxtCost,
+    legacyFeeUsdc,
+    nowFeeUsdc,
+    tokenInSymbol: direction === "buy" ? "mUSDC" : "PXT",
+    tokenOutSymbol: direction === "buy" ? "PXT" : "mUSDC",
+    gasEstimate: inQ.gasEstimate,
+    hookMode: "return-delta",
+  };
+}
+
+export async function quoteSwap(
+  direction: SwapDirection,
+  amount: bigint,
+  trader: string,
+  settlement: SettlementMode = "wallet",
+  exactness: SwapExactness = "exactIn",
+): Promise<SwapQuote> {
+  return exactness === "exactOut"
+    ? quoteExactOut(direction, amount, trader, settlement)
+    : quoteExactIn(direction, amount, trader, settlement);
 }
 
 export function feeTierLabel(tier: FeeTier, bps: bigint): string {
