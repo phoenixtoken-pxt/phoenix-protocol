@@ -242,3 +242,30 @@ Tests: `test_exact_in_sell_partial_fill_burns_actual`, `test_exact_out_buy_gross
 ### Residual risk
 
 Floor division can leave 1 wei vs a naive `gross * bps / BPS`. Exact-in specified payment cannot be reduced in `afterSwap`; sell PXT leftover is refunded in `attributeSell`, exact-in buy leftover has no authentic buyer and is accrued as buyback. ERC-6909 exact-in partial fills never hit `attributeSell`, so leftover PXT can sit on the hook until a later flow. Hook outbound PXT is fee-free.
+
+---
+
+## RAAAU — Router Allowlist Authorizes All Users
+
+| | |
+|--|--|
+| **Criticality** | Medium |
+| **PDF** | `PhoenixV4ReturnDeltaHook` `_beforeAddLiquidity` / `liquidityProvider` |
+| **Our status** | Resolved |
+| **Code** | Working tree (FeeCollector-only pre-lock LP) |
+
+### Finding
+
+Pre-unlock LP used `liquidityProvider[sender]` where `sender` is PoolManager’s direct caller — usually a shared Position Manager / router, not the beneficial provider. Allowlisting that router lets **any** user mint through it. `hookData` is chosen by the locker and is not authentic identity.
+
+### What we shipped
+
+Removed `liquidityProvider` / `setLiquidityProvider`. While `block.timestamp < sellUnlock`, adds require `sender == address(feeCollector)`.
+
+Protocol seed and recycle call `modifyLiquidity` from FeeCollector’s `unlockCallback`, so `sender` is the collector — not a shared router. Strangers (and admin) using `lpRouter` / POSM still have `sender = router` and revert `LiquidityNotAllowed`. After sell unlock the gate is off (permissionless LP).
+
+Tests: `test_lp_gate_blocks_stranger_during_sell_lock`, `test_lp_gate_blocks_router_even_for_admin`, `test_lp_gate_allows_stranger_after_sell_unlock`.
+
+### Residual risk
+
+No extra team LP via public routers before unlock — only one-shot seed + recycle through FeeCollector. If pre-lock LP from another contract is ever needed, deploy a dedicated non-shared locker (not POSM), not a mapping allowlist on shared routers.

@@ -39,7 +39,7 @@ import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeMod
 //
 // Trading gate
 // Swaps require sell unlock + anti-bot clear (`PhoenixAntiBotOpenSell` after unlock).
-// Liquidity: allowlisted providers only while sells are locked; permissionless after unlock.
+// Liquidity: only FeeCollector may add LP while sells are locked (RAAAU); permissionless after unlock.
 // User→PoolManager is fee-free only for attested DEX sells and LP mints (PTTB).
 //
 // Dump window
@@ -72,9 +72,6 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     PoolId public officialPoolId;
     bool public officialPoolSet;
 
-    /// @notice May add liquidity while sells are still locked (PoolManager `sender`).
-    mapping(address => bool) public liquidityProvider;
-
     mapping(address => SellWindow) public sellWindows;
 
     // Transient pending sell (same-tx ERC-20 attributeSell) via EIP-1153.
@@ -104,7 +101,6 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
 
     event OfficialPoolSet(PoolId indexed poolId);
     event FeeCollectorSet(address indexed collector);
-    event LiquidityProviderSet(address indexed account, bool allowed);
     event HookFeeCharged(address indexed trader, FeeKind kind, uint256 feeBps, uint256 feeAmount);
     event SellAttributed(address indexed seller, uint256 pxtAmount, uint256 fairFeeBps, uint256 usdcRefunded);
     event OrphanSellFinalized(uint256 usdcSkim, uint256 donation, uint256 marketing, uint256 buyback);
@@ -124,22 +120,12 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         if (address(pxt_) == address(0) || admin == address(0)) revert ZeroAddress();
         pxt = pxt_;
         pxtCurrency = Currency.wrap(address(pxt_));
-        liquidityProvider[admin] = true;
-        emit LiquidityProviderSet(admin, true);
     }
 
     function setFeeCollector(PhoenixFeeCollector collector_) external onlyOwner {
         if (address(collector_) == address(0)) revert ZeroAddress();
         feeCollector = collector_;
-        liquidityProvider[address(collector_)] = true;
         emit FeeCollectorSet(address(collector_));
-        emit LiquidityProviderSet(address(collector_), true);
-    }
-
-    function setLiquidityProvider(address account, bool allowed) external onlyOwner {
-        if (account == address(0)) revert ZeroAddress();
-        liquidityProvider[account] = allowed;
-        emit LiquidityProviderSet(account, allowed);
     }
 
     function setOfficialPool(PoolKey calldata key) external onlyOwner {
@@ -184,7 +170,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         );
     }
 
-    /// @dev During sell lock only `liquidityProvider[sender]` may add LP. After unlock, anyone may.
+    /// @dev During sell lock only FeeCollector may add LP (calls modifyLiquidity itself — RAAAU).
+    ///      After unlock, anyone may mint via shared routers.
     function _beforeAddLiquidity(
         address sender,
         PoolKey calldata key,
@@ -193,7 +180,9 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     ) internal view override returns (bytes4) {
         _enforceOfficialPool(key);
         if (params.liquidityDelta > 0 && block.timestamp < pxt.sellUnlockTimestamp()) {
-            if (!liquidityProvider[sender]) revert LiquidityNotAllowed();
+            if (address(feeCollector) == address(0) || sender != address(feeCollector)) {
+                revert LiquidityNotAllowed();
+            }
         }
         return this.beforeAddLiquidity.selector;
     }
