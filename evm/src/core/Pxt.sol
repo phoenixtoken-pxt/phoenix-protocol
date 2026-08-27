@@ -17,7 +17,8 @@ import {ISellAttributor} from "../return-delta/ISellAttributor.sol";
 // - FeeExempt does NOT skip sell lock / anti-bot. Tax / USDC rebate only (via attributor).
 // - FeeCollector -> PoolManager is LP settle (seed/recycle), not a user sell.
 // - With sellAttributor set (ReturnDelta hook): notifies ISellAttributor for USDC fee
-//   attribution / dump-window rebate. Dump economics live on the hook, not on-token.
+//   attribution / dump-window rebate, and PoolManager→user receipts (FBBP). Dump economics
+//   live on the hook, not on-token.
 //
 // feeCollector and sellAttributor are configured once during bootstrap, verified by
 // LockProtocolReturnDelta, then frozen when Ownable is renounced before go-live.
@@ -259,6 +260,12 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
         if (fee.totalFee == 0) {
             super._update(from, to, amount);
+            if (
+                poolManager != address(0) && from == poolManager && address(sellAttributor) != address(0)
+                    && to != feeCollector
+            ) {
+                sellAttributor.creditFromPoolManager(to, amount);
+            }
             return;
         }
 
