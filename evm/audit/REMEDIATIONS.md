@@ -375,3 +375,32 @@ No timelock on renounce itself; no on-chain “go-live” flag beyond `owner == 
 
 - **Pre-go-live only:** Until renounce, treat the deployer as trusted (see ST cross-ref). Do not open public trading before lock.
 - Post-lock, multisig can still add/remove approved contract recipients and buyback callers — scoped roles by design, not owner takeover of sell lock or fee economics.
+
+---
+
+## EOIPF — Expected Output Ignores Pool Fees
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixBuyback.sol`, `PhoenixBuybackMath.sol` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+`_executeBuybackCash` sizes `expectedPxt` via `pxtForQuote` at the frozen spot — a fee-free, zero-impact conversion. The auditor notes that a non-zero **Uniswap LP fee** would make that baseline optimistic vs `enforceMinOut`, so valid buybacks could revert on `Slippage()`.
+
+### Decision
+
+**Accepted.** The official pool is deployed with **LP fee = 0** by design (`PoolKey.fee == 0` at bootstrap). Protocol economics (2.7% buy/sell skims, burn, dump window) come from the **return-delta hook**, not from the v4 pool fee tier. FeeCollector **buyback swaps skip the hook buy skim** (`sender == feeCollector`), so buyback USDC is not taxed again on the way in.
+
+`pxtForQuote` + `maxBuybackSlippageBps` + `sqrtPriceLimitX96` remain the on-chain guard: execution is bounded by the limit; keepers should still pass a quote-based `minPxtBought` when using a public mempool (see JLVE).
+
+### Not done
+
+No fee-aware v4 quoter inside `PhoenixBuyback`; no change to `pxtForQuote` / `enforceMinOut` for hypothetical non-zero LP fees.
+
+### Residual risk
+
+Large buybacks vs available liquidity can still hit `Slippage()` from **curve impact** (not LP fee). Mitigation is ops: smaller `usdcAmount`, wait for depth, or set `minPxtBought` from an off-chain quote. Default 2% slippage is sized for normal keeper flow on the seeded official pool.
