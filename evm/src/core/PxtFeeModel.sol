@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 // Shared fee tiers, types, and pure math for PXT and V4 hook fee splits.
 
 // Production default: 2027-03-01 00:00:00 UTC. Overridable at Pxt deploy for local testing.
-uint256 constant DEFAULT_SELL_UNLOCK_TIMESTAMP = 1_803_744_000;
+uint256 constant DEFAULT_SELL_UNLOCK_TIMESTAMP = 1_803_859_200;
 
 enum FeeKind {
     None,

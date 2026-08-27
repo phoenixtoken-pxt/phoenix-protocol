@@ -5,7 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pxt} from "../src/core/Pxt.sol";
-import {FeeBreakdown, FeeKind, SellsLocked, AntiBotSellBlocked, ZeroAddress} from "../src/core/PxtFeeModel.sol";
+import {
+    DEFAULT_SELL_UNLOCK_TIMESTAMP,
+    FeeBreakdown,
+    FeeKind,
+    SellsLocked,
+    AntiBotSellBlocked,
+    ZeroAddress
+} from "../src/core/PxtFeeModel.sol";
 import {ISellAttributor} from "../src/return-delta/ISellAttributor.sol";
 
 contract MockPool {}
@@ -250,6 +257,11 @@ contract PxtTest is Test {
 
     function test_sell_unlock_timestamp_is_fixed() public view {
         assertGt(pxt.sellUnlockTimestamp(), block.timestamp);
+    }
+
+    function test_default_sell_unlock_matches_documented_utc() public pure {
+        // 2027-03-01 00:00:00 UTC (not 1_803_744_000 = 2027-02-27 16:00 UTC).
+        assertEq(DEFAULT_SELL_UNLOCK_TIMESTAMP, 1_803_859_200);
     }
 
     function test_quote_transfer_matches_execution() public {
