@@ -5,11 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {PhoenixBuybackMath} from "../src/fee/PhoenixBuybackMath.sol";
 
 contract PhoenixBuybackMathHarness {
-    function pxtForQuote(uint256 quoteAmount, uint160 sqrtPriceX96, bool pxtIsToken0)
-        external
-        pure
-        returns (uint256)
-    {
+    function pxtForQuote(uint256 quoteAmount, uint160 sqrtPriceX96, bool pxtIsToken0) external pure returns (uint256) {
         return PhoenixBuybackMath.pxtForQuote(quoteAmount, sqrtPriceX96, pxtIsToken0);
     }
 
