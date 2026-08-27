@@ -588,3 +588,32 @@ No `beforeInitialize` hook permission, no on-chain initializer allowlist, no `ex
 ### Residual risk
 
 A public-mempool deploy that leaves `initialize` exposed could be front-run (grief / wrong spot). Mitigation is ops: bundle deploy + price check before seed; redeploy with a new hook salt if init is griefed. After correct init and seed, this finding does not apply.
+
+---
+
+## RCRP — Rotated Contracts Retain Privileges
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `Pxt.sol` `setFeeCollector` / `setSellAttributor`; audit-era `PhoenixV4ReturnDeltaHook` `liquidityProvider` |
+| **Our status** | Resolved |
+| **Code** | Working tree (with **ST** one-shot setters + **RAAAU** LP gate) |
+
+### Finding
+
+At audit (`752cf67`), rotating `setFeeCollector` or `setSellAttributor` on Pxt granted allowlist to the new address without revoking the old one, so historical contracts kept contract-recipient approval. The hook similarly accumulated `liquidityProvider` entries on each collector rotation.
+
+### What we shipped
+
+- **`setFeeCollector` / `setSellAttributor` are one-shot** on Pxt (`FeeCollectorAlreadySet`, `SellAttributorAlreadySet`) — no post-bootstrap rotation, no superseded allowlist entries (see **ST**).
+- **`setPoolManager` revokes** the previous PoolManager allowlist before granting the new one.
+- **Hook `liquidityProvider` removed** (**RAAAU**); pre-unlock LP uses `sender == feeCollector` instead of a rotatable mapping.
+- **`FeeCollector.setHook` is one-shot** (`HookAlreadySet`).
+- After **`LockProtocolReturnDelta`**, Ownable is renounced — no owner path to rotate wiring anyway.
+
+PoolManager / FeeCollector / sell attributor remain **protected recipients** (allowlist cannot be revoked via governance) so DEX settlement cannot be bricked — intentional, not stale rotation.
+
+### Residual risk
+
+Pre-lock only: `hook.setFeeCollector` can still overwrite the hook pointer (Pxt collector is one-shot, so a mismatched hook/collector pair would break ops, not accumulate extra Pxt privileges). Bootstrap sets each address once; lock script verifies wiring before renounce.
