@@ -644,3 +644,30 @@ No auto-`FeeExempt` in `setFeeCollector`, no owner→collector seed exemption in
 ### Residual risk
 
 A custom deploy that sets `feeCollector` but forgets `FeeExempt` before seed pays 2.7% on the PXT leg and may revert or mis-seed. Mitigation is scripted bootstrap + pre-lock verification, not on-chain enforcement.
+
+---
+
+## L04 — Conformance to Solidity Naming Conventions
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `Pxt.sol` `SELL_UNLOCK_TIMESTAMP`, `DONATION_WALLET`, `MARKETING_WALLET` |
+| **Our status** | Rejected (not applicable) |
+| **Code** | N/A |
+
+### Finding
+
+Auditor applied the generic “state variables → mixedCase” rule to **immutable** fields and flagged `SELL_UNLOCK_TIMESTAMP`, `DONATION_WALLET`, and `MARKETING_WALLET` as non-conformant.
+
+### Decision
+
+**Rejected.** The [official Solidity style guide](https://docs.soliditylang.org/en/latest/style-guide.html#naming-conventions) defines naming for **constants** (`UPPER_CASE`) and **mutable state** (`mixedCase`) but does **not** specify immutables. **Foundry** lint (`screaming-snake-case-immutable`) recommends `SCREAMING_SNAKE_CASE` for immutables so they read like fixed-at-deploy config alongside constants — which is what we use. Renaming would churn the public ABI (`DONATION_WALLET()`, `MARKETING_WALLET()`) for no functional gain.
+
+### Not done
+
+No renames to `donationWallet` / `marketingWallet` / private `sellUnlockTimestamp` field naming.
+
+### Residual risk
+
+None. Style-only finding; naming is consistent within the repo and aligned with Foundry guidance.
