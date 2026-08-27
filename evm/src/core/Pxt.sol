@@ -221,6 +221,11 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
     function _enforceContractRecipient(address from, address to) internal view {
         if (poolManager != address(0) && from == poolManager) return;
+        // One-shot seed LP may return unused tokens to FeeCollector's owner (pre-renounce deployer).
+        if (feeCollector != address(0) && from == feeCollector) {
+            address collectorOwner = Ownable(feeCollector).owner();
+            if (collectorOwner != address(0) && to == collectorOwner) return;
+        }
         // DEX sells / LP settle / attributor always allowed regardless of allowlist bit.
         if (_isProtectedRecipient(to)) return;
         if (_isWallet(to)) return;
