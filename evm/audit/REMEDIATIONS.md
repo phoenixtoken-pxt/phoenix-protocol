@@ -532,3 +532,32 @@ No LP-fee allocation policy (unnecessary at fee 0). No on-chain `require(key.fee
 ### Residual risk
 
 If a misconfigured pool were ever wired with a non-zero LP fee, those fees would accrue to LP positions on Uniswap, not to the hook skim ledger. Mitigation is deploy discipline: bootstrap uses `LP_FEE = 0`; do not point `configurePool` at a fee-bearing pool.
+
+---
+
+## MC — Missing Check
+
+| | |
+|--|--|
+| **Criticality** | Minor / Informative |
+| **PDF** | `PhoenixV4ReturnDeltaHook.sol` `setOfficialPool`; `PhoenixBuyback.sol` `configurePool` / `setBuybackParams`; `PhoenixBuybackMath.sol` `recycleTicks` |
+| **Our status** | Accepted (by design) |
+| **Code** | N/A |
+
+### Finding
+
+One-shot admin setters do not fully validate inputs before persisting them. `setOfficialPool` only checks that the pool contains PXT (not that `key.hooks` is this hook). `configurePool` does not cross-check the official pool, hook address, tick alignment, or LP fee. `setBuybackParams` only rejects zero recycle width; extreme values can overflow `int24` width math and brick buybacks after renounce.
+
+### Decision
+
+**Accepted.** These are **pre-go-live, owner-only, one-shot** configuration paths (see **CCR**). `BootstrapReturnDeltaFork` wires the correct pool key, ticks, hook, and buyback params in a fixed order; `LockProtocolReturnDelta` verifies hook ↔ collector wiring, seed liquidity, slippage, and attributor before renounce. Misconfiguration before lock is a deploy failure (redeploy), not a post-launch exploit — there is no owner after renounce to fix bad params anyway.
+
+Bootstrap defaults are safe (`LP_FEE = 0`, `recycleWidthSpacings = 10`, `tickSpacing = 60`).
+
+### Not done
+
+No on-chain `key.hooks == address(this)` in `setOfficialPool`, no `configurePool` ↔ `officialPoolId` equality check, no tick-range validation in `configurePool`, no recycle-width overflow cap in `setBuybackParams`.
+
+### Residual risk
+
+Operator error before renounce (wrong pool, wrong ticks, huge recycle width) can permanently bind incompatible state. Mitigation is scripted bootstrap + lock ceremony checks, not additional setter guards.
