@@ -10,7 +10,7 @@ Utility token for the Phoenix Token ecosystem. This repository implements **PXT*
 | **Symbol** | PXT |
 | **Type** | Utility token |
 | **Decimals** | 6 |
-| **Total supply** | 971,000,000,000 |
+| **Total supply** | 40,021,000,000,000 |
 | **Fee wallets** | Immutable (`DONATION_WALLET`, `MARKETING_WALLET`). Cash buyback runs on `PhoenixFeeCollector`. |
 
 ## Fee rates

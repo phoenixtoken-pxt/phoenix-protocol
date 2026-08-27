@@ -32,8 +32,8 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
     uint8 public constant TOKEN_DECIMALS = 6;
 
-    /// 971 billion whole tokens in base units (10^6 decimals).
-    uint256 public constant TOTAL_SUPPLY = 971_000_000_000 * 10 ** TOKEN_DECIMALS;
+    /// 40.021 trillion whole tokens in base units (10^6 decimals).
+    uint256 public constant TOTAL_SUPPLY = 40_021_000_000_000 * 10 ** TOKEN_DECIMALS;
 
     /// @notice When V4 sells unlock. Set at deploy (immutable).
     uint256 private immutable SELL_UNLOCK_TIMESTAMP;
