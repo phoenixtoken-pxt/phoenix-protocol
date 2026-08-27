@@ -31,7 +31,6 @@ contract LockProtocolReturnDelta is WalletStatusConfig {
     error PoolNotConfigured();
     error ZeroProtocolLiquidity();
     error SlippageNotConfigured();
-    error CollectorNotLiquidityProvider();
     error HookMismatch();
     error AlreadyRenounced(address who);
     error RenounceFailed(address who);
@@ -69,7 +68,6 @@ contract LockProtocolReturnDelta is WalletStatusConfig {
         if (!collector.poolConfigured()) revert PoolNotConfigured();
         if (address(collector.hook()) != hookAddr) revert HookMismatch();
         if (address(hook.feeCollector()) != collectorAddr) revert HookMismatch();
-        if (!hook.liquidityProvider(collectorAddr)) revert CollectorNotLiquidityProvider();
         requireSellAttributorIsHook(pxt, hookAddr);
         requireMatchingFeeWallets(pxt, collector);
         requirePxtFeeCollector(pxt, collectorAddr);
@@ -161,7 +159,7 @@ contract LockProtocolReturnDelta is WalletStatusConfig {
         console2.log("sellAttributor (hook):", address(pxt.sellAttributor()));
         console2.log("positionLiquidity (unchanged holder):", positionLiq);
         console2.log("maxBuybackSlippageBps (frozen):", collector.maxBuybackSlippageBps());
-        console2.log("Public LP allowed after sell unlock; FeeCollector remains allowlisted for recycle");
+        console2.log("Public LP allowed after sell unlock; pre-lock LP is FeeCollector-only (RAAAU)");
         console2.log("collect() remains permissionless; executeBuyback requires authorized caller");
         console2.log("setAuthorizedBuybackCaller on BUYBACK_EXECUTOR_APPROVER_ROLE");
         console2.log("setApprovedContractRecipient remains on RECIPIENT_APPROVER_ROLE");

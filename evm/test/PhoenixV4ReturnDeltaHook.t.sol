@@ -226,6 +226,36 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Shared lpRouter sender is never FeeCollector — admin cannot bypass via POSM (RAAAU).
+    function test_lp_gate_blocks_router_even_for_admin() public {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(0);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPrice,
+            TickMath.getSqrtPriceAtTick(TICK_LOWER),
+            TickMath.getSqrtPriceAtTick(TICK_UPPER),
+            100 * WHOLE,
+            100 * WHOLE
+        );
+
+        vm.startPrank(admin);
+        musdc.mint(admin, 1_000 * WHOLE);
+        pxt.transfer(admin, 1_000 * WHOLE);
+        IERC20(address(pxt)).approve(address(lpRouter), type(uint256).max);
+        musdc.approve(address(lpRouter), type(uint256).max);
+        vm.expectRevert();
+        lpRouter.modifyLiquidity(
+            key,
+            ModifyLiquidityParams({
+                tickLower: TICK_LOWER,
+                tickUpper: TICK_UPPER,
+                liquidityDelta: int256(uint256(liquidity)),
+                salt: bytes32(uint256(99))
+            }),
+            abi.encode(admin)
+        );
+        vm.stopPrank();
+    }
+
     function test_lp_gate_allows_stranger_after_sell_unlock() public {
         address stranger = makeAddr("stranger");
         vm.startPrank(admin);
@@ -1366,7 +1396,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
 
         LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
         locker.requireSellAttributorIsHook(pxt, address(hook));
-        assertTrue(hook.liquidityProvider(address(feeCollector)));
+        assertEq(address(hook.feeCollector()), address(feeCollector));
         assertGt(feeCollector.maxBuybackSlippageBps(), 0);
 
         vm.startPrank(admin);
