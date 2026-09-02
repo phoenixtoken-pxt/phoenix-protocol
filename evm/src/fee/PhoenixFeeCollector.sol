@@ -15,8 +15,8 @@ import {PhoenixBuyback} from "./PhoenixBuyback.sol";
 // Shared fee treasury for Phoenix hooks.
 // Accrue via receiveAccruedFees (ReturnDelta USDC skims).
 // LP / buyback / recycle live on PhoenixBuyback (this contract inherits it).
-// collect() sweeps LP fee growth then pays donation / marketing / burn; buyback pending stays for executeBuyback.
-// After payout, wallet/burn pending is reconciled down to on-hand ERC-20 (Uniswap rounding gap).
+// collect() is permissionless (pays donation / marketing / burn); executeBuyback is allowlisted.
+// After payout, pending is reconciled to on-hand ERC-20; buyback cash is reserved first (CMBS).
 contract PhoenixFeeCollector is PhoenixBuyback {
     using SafeERC20 for IERC20;
 
@@ -57,28 +57,17 @@ contract PhoenixFeeCollector is PhoenixBuyback {
         emit FeeAccrued(token, kind, total, donation, marketing, burnAmount, buyback);
     }
 
-    /// @notice Permissionless: pull Uniswap LP fees (seed + recycle bands) and pay wallets + burn.
-    /// Pending buyback is left for `executeBuyback`.
-    function collect() external nonReentrant returns (uint256 pulled0, uint256 pulled1) {
+    /// @notice Permissionless: pay pending donation / marketing / burn from cash not reserved for buyback.
+    /// Pending buyback is left for authorized `executeBuyback`.
+    function collect() external nonReentrant {
         if (!poolConfigured) revert PoolNotConfigured();
 
         PoolKey memory key = poolKey;
-        address token0 = Currency.unwrap(key.currency0);
-        address token1 = Currency.unwrap(key.currency1);
-
-        uint256 before0 = IERC20(token0).balanceOf(address(this));
-        uint256 before1 = IERC20(token1).balanceOf(address(this));
-
-        _pullLpFees();
-
-        pulled0 = IERC20(token0).balanceOf(address(this)) - before0;
-        pulled1 = IERC20(token1).balanceOf(address(this)) - before1;
-
-        _payoutToken(token0, pulled0);
-        _payoutToken(token1, pulled1);
+        _payoutToken(Currency.unwrap(key.currency0));
+        _payoutToken(Currency.unwrap(key.currency1));
     }
 
-    function _payoutToken(address token, uint256 pulled) internal {
+    function _payoutToken(address token) internal {
         uint256 donationDue = pendingDonation[token];
         uint256 marketingDue = pendingMarketing[token];
         uint256 burnDue = pendingBurn[token];
@@ -90,17 +79,19 @@ contract PhoenixFeeCollector is PhoenixBuyback {
         }
 
         uint256 totalDue = donationDue + marketingDue + burnDue;
-
         uint256 bal = IERC20(token).balanceOf(address(this));
+        uint256 bbReserved = pendingBuyback[token];
+        uint256 available = bal > bbReserved ? bal - bbReserved : 0;
 
-        if (bal == 0 || totalDue == 0) {
-            emit FeesCollected(msg.sender, token, 0, 0, 0, 0, pulled);
+        if (available == 0 || totalDue == 0) {
+            emit FeesCollected(msg.sender, token, 0, 0, 0, 0, 0);
+            _reconcilePending(token);
             return;
         }
 
         // Prefer fulfilling burn first so sell/penalty PXT burn always runs when funds exist.
-        uint256 burnPay = burnDue < bal ? burnDue : bal;
-        uint256 remaining = bal - burnPay;
+        uint256 burnPay = burnDue < available ? burnDue : available;
+        uint256 remaining = available - burnPay;
 
         uint256 walletsDue = donationDue + marketingDue;
         uint256 walletSpendable = remaining < walletsDue ? remaining : walletsDue;
@@ -133,43 +124,7 @@ contract PhoenixFeeCollector is PhoenixBuyback {
         if (donationPay > 0) IERC20(token).safeTransfer(donationWallet, donationPay);
         if (marketingPay > 0) IERC20(token).safeTransfer(marketingWallet, marketingPay);
 
-        emit FeesCollected(msg.sender, token, donationPay, marketingPay, burnPay, 0, pulled);
-        _reconcileWalletBurnPending(token);
-    }
-
-    /// @dev Cap donation/marketing/burn pending to on-hand balance (prefer burn). Buyback untouched.
-    function _reconcileWalletBurnPending(address token) internal {
-        uint256 don = pendingDonation[token];
-        uint256 mkt = pendingMarketing[token];
-        uint256 burn = pendingBurn[token];
-        uint256 due = don + mkt + burn;
-        if (due == 0) return;
-
-        uint256 bal = IERC20(token).balanceOf(address(this));
-        if (due <= bal) return;
-
-        uint256 dueAfter;
-        if (bal == 0) {
-            pendingDonation[token] = 0;
-            pendingMarketing[token] = 0;
-            pendingBurn[token] = 0;
-            dueAfter = 0;
-        } else {
-            uint256 burnKeep = burn < bal ? burn : bal;
-            uint256 rest = bal - burnKeep;
-            uint256 wallets = don + mkt;
-            uint256 donKeep = 0;
-            uint256 mktKeep = 0;
-            if (wallets > 0 && rest > 0) {
-                donKeep = (don * rest) / wallets;
-                mktKeep = rest - donKeep;
-            }
-            pendingBurn[token] = burnKeep;
-            pendingDonation[token] = donKeep;
-            pendingMarketing[token] = mktKeep;
-            dueAfter = burnKeep + donKeep + mktKeep;
-        }
-
-        emit AccrualReconciled(token, due, dueAfter);
+        emit FeesCollected(msg.sender, token, donationPay, marketingPay, burnPay, 0, 0);
+        _reconcilePending(token);
     }
 }

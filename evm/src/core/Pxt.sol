@@ -10,14 +10,20 @@ import {IPxtSellControls, PxtSellAccess} from "./PxtSellAccess.sol";
 import {ISellAttributor} from "../return-delta/ISellAttributor.sol";
 
 // Fee-on-transfer ERC20. Wallet transfers take 2.7% unless the recipient is FeeExempt
-// or NoPenalty (or the transfer is PoolManager settlement).
+// or NoPenalty. PoolManager *outbound* (buys / LP exits) is fee-free. User→PoolManager is
+// fee-free only for attested DEX sells and LP mints, plus FeeCollector/owner seed (PTTB).
+// Hook outbound (unfilled exact-in burn refund to the seller) is fee-free (RIFM).
 //
 // DEX sell settlement (user -> PoolManager) is authenticated by token custody:
 // - Sell lock + anti-bot first seller are enforced here.
 // - FeeExempt does NOT skip sell lock / anti-bot. Tax / USDC rebate only (via attributor).
 // - FeeCollector -> PoolManager is LP settle (seed/recycle), not a user sell.
 // - With sellAttributor set (ReturnDelta hook): notifies ISellAttributor for USDC fee
-//   attribution / dump-window rebate. Dump economics live on the hook, not on-token.
+//   attribution / dump-window rebate, and PoolManager→user receipts (FBBP). Dump economics
+//   live on the hook, not on-token.
+//
+// feeCollector and sellAttributor are configured once during bootstrap, verified by
+// LockProtocolReturnDelta, then frozen when Ownable is renounced before go-live.
 //
 // Contract-recipient allowlist is gated by RECIPIENT_APPROVER_ROLE (intended for a
 // multisig). Ownable admin setters can be renounced while that role remains on the Safe.
@@ -26,8 +32,8 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
     uint8 public constant TOKEN_DECIMALS = 6;
 
-    /// 971 billion whole tokens in base units (10^6 decimals).
-    uint256 public constant TOTAL_SUPPLY = 971_000_000_000 * 10 ** TOKEN_DECIMALS;
+    /// 40.021 trillion whole tokens in base units (10^6 decimals).
+    uint256 public constant TOTAL_SUPPLY = 40_021_000_000_000 * 10 ** TOKEN_DECIMALS;
 
     /// @notice When V4 sells unlock. Set at deploy (immutable).
     uint256 private immutable SELL_UNLOCK_TIMESTAMP;
@@ -35,7 +41,8 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
     address public immutable DONATION_WALLET;
     address public immutable MARKETING_WALLET;
 
-    /// @notice Uniswap v4 PoolManager - transfers to/from this address skip the 2.7% fee.
+    /// @notice Uniswap v4 PoolManager. Outbound settlement skips the 2.7% fee; inbound
+    ///         is fee-free only for attested DEX sells / LP mints (or collector/owner seed).
     address public poolManager;
 
     /// @notice First post-unlock seller; address(0) disables anti-bot.
@@ -71,6 +78,10 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
     error ContractRecipientNotApproved();
     error ProtectedRecipient();
     error InvalidSellUnlock();
+    error AntiBotSellerAlreadySet();
+    error SellProtectionAlreadyCleared();
+    error FeeCollectorAlreadySet();
+    error SellAttributorAlreadySet();
 
     constructor(address admin, address donation, address marketing, uint256 sellUnlockTimestamp_)
         ERC20("Phoenix Token", "PXT")
@@ -118,12 +129,14 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         emit PoolManagerSet(poolManager_);
     }
 
-    /// @notice Designate the first post-unlock seller (e.g. `PhoenixAntiBotOpenSell`).
+    /// @notice Designate the first post-unlock seller (e.g. `PhoenixAntiBotOpenSell`). One-shot; cannot
+    ///         reconfigure after set or after public trading has opened via `clearSellProtection`.
     /// @dev Zero is rejected; public sells open via `clearSellProtection`, not by clearing the seller.
     function setAntiBotSeller(address seller) external onlyOwner {
         if (seller == address(0)) revert ZeroAddress();
+        if (sellProtectionCleared) revert SellProtectionAlreadyCleared();
+        if (antiBotSeller != address(0)) revert AntiBotSellerAlreadySet();
         antiBotSeller = seller;
-        sellProtectionCleared = false;
         emit AntiBotSellerSet(seller);
     }
 
@@ -139,17 +152,21 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         emit SellProtectionCleared();
     }
 
-    /// @notice Protocol fee treasury / LP holder.
+    /// @notice Protocol fee treasury / LP holder. One-shot at bootstrap; Ownable is renounced
+    ///         in `LockProtocolReturnDelta` before public trading — this address cannot be changed afterward.
     function setFeeCollector(address collector_) external onlyOwner {
         if (collector_ == address(0)) revert ZeroAddress();
+        if (feeCollector != address(0)) revert FeeCollectorAlreadySet();
         feeCollector = collector_;
         _setApprovedContractRecipient(collector_, true);
         emit FeeCollectorSet(collector_);
     }
 
-    /// @notice Set sell attributor for USDC attribution / dump window on the hook.
+    /// @notice Sell attributor (ReturnDelta hook) for USDC attribution / dump window. One-shot at bootstrap;
+    ///         renounce Ownable before go-live so a mis-set attributor cannot brick pool sells.
     function setSellAttributor(ISellAttributor attributor_) external onlyOwner {
         if (address(attributor_) == address(0)) revert ZeroAddress();
+        if (address(sellAttributor) != address(0)) revert SellAttributorAlreadySet();
         sellAttributor = attributor_;
         _setApprovedContractRecipient(address(attributor_), true);
         emit SellAttributorSet(address(attributor_));
@@ -195,16 +212,20 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         return false;
     }
 
+    /// @dev EOAs have no code. EIP-7702 delegated accounts carry 23-byte designation bytecode
+    ///      indistinguishable from a deployed contract with the same bytes (CCIB); they are not
+    ///      treated as wallets here. PoolManager→user payouts skip the allowlist separately.
     function _isWallet(address account) internal view returns (bool) {
-        uint256 size = account.code.length;
-        if (size == 0) return true;
-        if (size != 23) return false;
-        bytes memory code = account.code;
-        return code[0] == 0xef && code[1] == 0x01 && code[2] == 0x00;
+        return account.code.length == 0;
     }
 
     function _enforceContractRecipient(address from, address to) internal view {
         if (poolManager != address(0) && from == poolManager) return;
+        // One-shot seed LP may return unused tokens to FeeCollector's owner (pre-renounce deployer).
+        if (feeCollector != address(0) && from == feeCollector) {
+            address collectorOwner = Ownable(feeCollector).owner();
+            if (collectorOwner != address(0) && to == collectorOwner) return;
+        }
         // DEX sells / LP settle / attributor always allowed regardless of allowlist bit.
         if (_isProtectedRecipient(to)) return;
         if (_isWallet(to)) return;
@@ -224,28 +245,53 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
 
         _enforceContractRecipient(from, to);
 
-        // DEX sell settlement: authentic seller = `from`.
+        // DEX sell / LP settle: authentic sender = `from`. Naked hops pay the 2.7% tax (PTTB).
         if (poolManager != address(0) && to == poolManager && from != poolManager) {
             // LP settle (not a user sell): FeeCollector anytime (seed/recycle); Ownable admin only
             // before sell unlock so deploy can seed then renounce. After renounce owner==0.
             bool collectorSettle = feeCollector != address(0) && from == feeCollector;
             bool ownerSeedBeforeUnlock = from == owner() && block.timestamp < SELL_UNLOCK_TIMESTAMP;
-            if (collectorSettle || ownerSeedBeforeUnlock) {
+            bool attributorSettle = address(sellAttributor) != address(0) && from == address(sellAttributor);
+            if (collectorSettle || ownerSeedBeforeUnlock || attributorSettle) {
+                if (address(sellAttributor) != address(0)) {
+                    sellAttributor.consumeLpInbound(amount);
+                }
                 super._update(from, to, amount);
                 return;
             }
 
-            // Every other sender (including FeeExempt) must pass sell lock + anti-bot.
-            _enforceSellAccess(from);
-            super._update(from, to, amount);
-            _onDexSell(from, amount);
-            return;
+            if (address(sellAttributor) != address(0)) {
+                uint256 pendingSell = sellAttributor.pendingDexSellAmount();
+                if (pendingSell != 0) {
+                    // Real DEX sell, or a mismatched settle that must revert in attributeSell.
+                    _enforceSellAccess(from);
+                    super._update(from, to, amount);
+                    _onDexSell(from, amount);
+                    return;
+                }
+                if (sellAttributor.consumeLpInbound(amount)) {
+                    super._update(from, to, amount);
+                    return;
+                }
+                // Fall through: 2.7% wallet tax.
+            } else {
+                _enforceSellAccess(from);
+                super._update(from, to, amount);
+                _onDexSell(from, amount);
+                return;
+            }
         }
 
         FeeBreakdown memory fee = _quoteTransfer(from, to, amount);
 
         if (fee.totalFee == 0) {
             super._update(from, to, amount);
+            if (
+                poolManager != address(0) && from == poolManager && address(sellAttributor) != address(0)
+                    && to != feeCollector
+            ) {
+                sellAttributor.creditFromPoolManager(to, amount);
+            }
             return;
         }
 
@@ -276,7 +322,12 @@ contract Pxt is ERC20, ERC20Permit, Ownable, AccessControl, PxtFeeEvents {
         view
         returns (FeeBreakdown memory breakdown)
     {
-        if (poolManager != address(0) && (from == poolManager || to == poolManager)) {
+        if (poolManager != address(0) && from == poolManager) {
+            return PxtFeeModel.noFee(amount);
+        }
+
+        // Hook → seller refund of unfilled exact-in burn (RIFM); also hook → PoolManager.
+        if (address(sellAttributor) != address(0) && from == address(sellAttributor)) {
             return PxtFeeModel.noFee(amount);
         }
 

@@ -97,8 +97,8 @@ contract BootstrapReturnDeltaFork is WalletStatusConfig {
 
         uint8 quoteDecimals = uint8(vm.envOr("QUOTE_DECIMALS", uint256(6)));
         uint160 hookFlags = uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
         vm.startBroadcast(adminKey);
@@ -183,6 +183,8 @@ contract BootstrapReturnDeltaFork is WalletStatusConfig {
         // Default 200 bps MEV band (spot-referenced; prefer keeper + minPxtBought in production).
         uint16 buybackSlip = uint16(vm.envOr("BUYBACK_MAX_SLIPPAGE_BPS", uint256(200)));
         d.feeCollector.setBuybackParams(recycleWidth, buybackSlip);
+
+        _applyBuybackCallersFromEnv(d.feeCollector, address(0));
 
         vm.stopBroadcast();
     }

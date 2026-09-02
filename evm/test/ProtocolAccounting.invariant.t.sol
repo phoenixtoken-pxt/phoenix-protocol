@@ -25,7 +25,7 @@ import {PhoenixFeeCollector} from "../src/fee/PhoenixFeeCollector.sol";
 import {HookMiner} from "../src/uniswap/v4/HookMiner.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
-/// @dev Random buy / sell / claim-sell / collect / buyback / finalize / prune after trading opens.
+/// @dev Random buy / sell / claim-sell / collect / buyback / finalize after trading opens.
 contract ProtocolAccountingHandler is Test {
     using SafeCast for uint256;
 
@@ -154,7 +154,7 @@ contract ProtocolAccountingHandler is Test {
     }
 
     function finalizeOrphan() external {
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         if (skim == 0) return;
         hook.finalizeOrphanedSell();
     }
@@ -167,12 +167,10 @@ contract ProtocolAccountingHandler is Test {
         (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
         if (pendBb == 0) return;
         usdcAmount = bound(usdcAmount, 0, pendBb);
+        // Promote last-block swap spot into the buyback ref (Foundry often stays on one block).
+        vm.roll(block.number + 1);
         // Price impact after prior swaps can trip protocol slippage — skip those paths.
         try feeCollector.executeBuyback(usdcAmount, 0, block.timestamp + 1 hours) {} catch {}
-    }
-
-    function pruneBands() external {
-        feeCollector.pruneEmptyRecycleBands();
     }
 }
 
@@ -219,8 +217,8 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         pxt.setPoolManager(address(manager));
 
         uint160 flags = uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         (address hookAddr, bytes32 salt) = HookMiner.find(
             address(this), flags, type(PhoenixV4ReturnDeltaHook).creationCode, abi.encode(manager, pxt, antiBot, admin)
@@ -291,6 +289,8 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
         initialSupply = pxt.totalSupply();
 
         handler = new ProtocolAccountingHandler(manager, swapRouter, pxt, musdc, hook, feeCollector, key, alice);
+        vm.prank(admin);
+        feeCollector.setAuthorizedBuybackCaller(address(handler), true);
         targetContract(address(handler));
     }
 
@@ -299,26 +299,24 @@ contract ProtocolAccountingInvariantTest is StdInvariant, Test {
     }
 
     function invariant_hook_usdc_covers_orphan_skim() public view {
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertGe(musdc.balanceOf(address(hook)), uint256(skim));
     }
 
-    function invariant_fee_collector_wallet_burn_pending_backed() public view {
-        _assertWalletBurnBacked(address(musdc));
-        _assertWalletBurnBacked(address(pxt));
+    function invariant_fee_collector_pending_backed() public view {
+        _assertPendingBacked(address(musdc));
+        _assertPendingBacked(address(pxt));
     }
 
-    function invariant_seed_lp_unchanged_and_band_cap() public view {
+    function invariant_seed_lp_unchanged() public view {
         // Cash-only buyback never peels the seeded full-range position.
         (, uint128 positionLiq) = feeCollector.quoteBuyback();
         assertEq(positionLiq, seedPositionLiq);
-        assertLe(feeCollector.recycleBandCount(), uint256(feeCollector.MAX_RECYCLE_BANDS()));
     }
 
-    function _assertWalletBurnBacked(address token) internal view {
-        (uint256 don, uint256 mkt, uint256 burn,) = feeCollector.pending(token);
-        uint256 due = don + mkt + burn;
-        assertLe(due, IERC20(token).balanceOf(address(feeCollector)));
+    function _assertPendingBacked(address token) internal view {
+        (uint256 don, uint256 mkt, uint256 burn, uint256 bb) = feeCollector.pending(token);
+        assertLe(don + mkt + burn + bb, IERC20(token).balanceOf(address(feeCollector)));
     }
 
     function _poolKey() internal view returns (PoolKey memory poolKey) {

@@ -4,12 +4,14 @@ pragma solidity ^0.8.26;
 import {Script, console2} from "forge-std/Script.sol";
 
 import {Pxt} from "../src/core/Pxt.sol";
+import {PhoenixFeeCollector} from "../src/fee/PhoenixFeeCollector.sol";
 
 /// @dev Shared env parsing for FeeExempt / NoPenalty wallet lists.
 /// Env (comma-separated, optional):
 ///   FEE_EXEMPT_WALLETS=0x...,0x...
 ///   NO_PENALTY_WALLETS=0x...,0x...
 /// Legacy single: NO_PENALTY_WALLET=0x... (used when NO_PENALTY_WALLETS is unset).
+///   BUYBACK_CALLERS=0x...,0x... (optional authorized executeBuyback callers)
 abstract contract WalletStatusConfig is Script {
     uint256 internal constant WALLET_STATUS_ANVIL_KEY_3 =
         0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6;
@@ -29,6 +31,25 @@ abstract contract WalletStatusConfig is Script {
             pxt.setWalletStatus(w, Pxt.WalletStatus.NoPenalty);
             console2.log("NoPenalty:", w);
             if (firstNoPenalty == address(0)) firstNoPenalty = w;
+        }
+    }
+
+    /// @dev Env (comma-separated, optional): BUYBACK_CALLERS=0x...,0x...
+    ///      Skips `exclude` (typically the deployer) so lock can require a non-admin keeper.
+    function _applyBuybackCallersFromEnv(PhoenixFeeCollector collector, address exclude)
+        internal
+        returns (uint256 applied)
+    {
+        if (!vm.envExists("BUYBACK_CALLERS")) return 0;
+        address[] memory callers = vm.envAddress("BUYBACK_CALLERS", ",");
+        for (uint256 i = 0; i < callers.length; ++i) {
+            address w = callers[i];
+            if (w == address(0) || w == exclude) continue;
+            collector.setAuthorizedBuybackCaller(w, true);
+            console2.log("AuthorizedBuybackCaller:", w);
+            unchecked {
+                ++applied;
+            }
         }
     }
 

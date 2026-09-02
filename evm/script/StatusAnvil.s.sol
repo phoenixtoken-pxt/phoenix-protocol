@@ -66,8 +66,12 @@ contract StatusAnvil is Script {
         console2.log("--- buyback ---");
         console2.log("recycleWidthSpacings", collector.recycleWidthSpacings());
         console2.log("maxBuybackSlippageBps", collector.maxBuybackSlippageBps());
+        console2.log("frozenSqrtPriceX96", collector.frozenSqrtPriceX96());
+        console2.log("pendingSqrtPriceX96", collector.pendingSqrtPriceX96());
+        console2.log("pendingSpotBlock", collector.pendingSpotBlock());
         console2.log("positionLiquidity", positionLiq);
         console2.log("quoteBuyback usdcSpendable", usdcSpendable);
+        console2.log("seedLiquidityAdded", collector.seedLiquidityAdded());
         console2.log("recyclePxt", collector.recyclePxt());
         console2.log("lastRecycleTickLower", collector.lastRecycleTickLower());
         console2.log("lastRecycleTickUpper", collector.lastRecycleTickUpper());

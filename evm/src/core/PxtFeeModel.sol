@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 // Shared fee tiers, types, and pure math for PXT and V4 hook fee splits.
 
 // Production default: 2027-03-01 00:00:00 UTC. Overridable at Pxt deploy for local testing.
-uint256 constant DEFAULT_SELL_UNLOCK_TIMESTAMP = 1_803_744_000;
+uint256 constant DEFAULT_SELL_UNLOCK_TIMESTAMP = 1_803_859_200;
 
 enum FeeKind {
     None,
@@ -71,6 +71,19 @@ library PxtFeeModel {
             totalFee: 0,
             net: amount
         });
+    }
+
+    /// @notice Fee `f` such that `f / (net + f) == bps / BPS` (exact-out / true-up of pool-leg).
+    function grossUp(uint256 net, uint256 bps) internal pure returns (uint256 fee) {
+        if (bps == 0 || net == 0) return 0;
+        return (net * bps) / (BPS - bps);
+    }
+
+    /// @notice USDC skim bps for a sell / penalty tier.
+    function sellUsdcBps(uint256 feeBps) internal pure returns (uint256) {
+        if (feeBps == PENALTY_FEE_BPS) return PENALTY_USDC_FEE_BPS;
+        if (feeBps == 0) return 0;
+        return SELL_USDC_FEE_BPS;
     }
 
     /// @notice Buy (hook, USDC input) and transfer (PXT) share the same 1.45% / 1.25% split.

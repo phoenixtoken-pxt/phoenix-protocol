@@ -13,30 +13,28 @@ library PhoenixBuybackMath {
     error Slippage();
     error RecycleRangeInvalid();
 
-    /// @dev PXT notional equal to `quoteAmount` USDC at the given sqrt price.
+    /// @dev PXT notional equal to `quoteAmount` USDC at the given sqrt price (single mulDiv — EORZ).
     function pxtForQuote(uint256 quoteAmount, uint160 sqrtPriceX96, bool pxtIsToken0)
         internal
         pure
         returns (uint256 pxtAmount)
     {
         if (quoteAmount == 0 || sqrtPriceX96 == 0) return 0;
+
+        uint256 priceX192 = uint256(sqrtPriceX96) * uint256(sqrtPriceX96);
+        uint256 q192 = uint256(FixedPoint96.Q96) * uint256(FixedPoint96.Q96);
+
         if (pxtIsToken0) {
-            pxtAmount = FullMath.mulDiv(quoteAmount, FixedPoint96.Q96, sqrtPriceX96);
-            pxtAmount = FullMath.mulDiv(pxtAmount, FixedPoint96.Q96, sqrtPriceX96);
+            pxtAmount = FullMath.mulDiv(quoteAmount, q192, priceX192);
         } else {
-            pxtAmount = FullMath.mulDiv(
-                quoteAmount, FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, FixedPoint96.Q96), FixedPoint96.Q96
-            );
+            pxtAmount = FullMath.mulDiv(quoteAmount, priceX192, q192);
         }
     }
 
     /// @dev Require `actual >= max(callerMin, expected * (BPS - slippageBps) / BPS)`.
     function enforceMinOut(uint256 actual, uint256 callerMin, uint256 expected, uint16 slippageBps) internal pure {
         if (actual < callerMin) revert Slippage();
-        if (expected == 0) {
-            if (actual == 0) revert Slippage();
-            return;
-        }
+        if (expected == 0) revert Slippage();
         uint256 protocolMin = FullMath.mulDiv(expected, PxtFeeModel.BPS - slippageBps, PxtFeeModel.BPS);
         if (actual < protocolMin) revert Slippage();
     }

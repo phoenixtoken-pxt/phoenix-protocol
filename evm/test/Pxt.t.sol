@@ -5,10 +5,40 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pxt} from "../src/core/Pxt.sol";
-import {FeeBreakdown, FeeKind, SellsLocked, AntiBotSellBlocked, ZeroAddress} from "../src/core/PxtFeeModel.sol";
+import {
+    DEFAULT_SELL_UNLOCK_TIMESTAMP,
+    FeeBreakdown,
+    FeeKind,
+    SellsLocked,
+    AntiBotSellBlocked,
+    ZeroAddress
+} from "../src/core/PxtFeeModel.sol";
 import {ISellAttributor} from "../src/return-delta/ISellAttributor.sol";
 
 contract MockPool {}
+
+contract MockAttributorNoSettle is ISellAttributor {
+    function attributeSell(address, uint256) external {}
+
+    function creditFromPoolManager(address, uint256) external {}
+
+    function pendingDexSellAmount() external pure returns (uint256) {
+        return 0;
+    }
+
+    function consumeLpInbound(uint256) external pure returns (bool) {
+        return false;
+    }
+}
+
+/// @dev Stand-in for FeeCollector owner() in CCIB seed-refund tests.
+contract MockFeeCollectorShell {
+    address public immutable owner;
+
+    constructor(address owner_) {
+        owner = owner_;
+    }
+}
 
 contract PxtTest is Test {
     using stdStorage for StdStorage;
@@ -229,6 +259,11 @@ contract PxtTest is Test {
         assertGt(pxt.sellUnlockTimestamp(), block.timestamp);
     }
 
+    function test_default_sell_unlock_matches_documented_utc() public pure {
+        // 2027-03-01 00:00:00 UTC (not 1_803_744_000 = 2027-02-27 16:00 UTC).
+        assertEq(DEFAULT_SELL_UNLOCK_TIMESTAMP, 1_803_859_200);
+    }
+
     function test_quote_transfer_matches_execution() public {
         FeeBreakdown memory quote = pxt.quoteTransfer(alice, bob, 1_000 * ONE);
 
@@ -270,6 +305,25 @@ contract PxtTest is Test {
         vm.prank(pm);
         pxt.transfer(bob, amount);
         assertEq(pxt.balanceOf(bob), amount);
+    }
+
+    function test_transfer_to_pool_manager_pays_tax_without_attested_settle() public {
+        address pm = makeAddr("poolManager");
+        vm.etch(pm, hex"00");
+        MockAttributorNoSettle attributor = new MockAttributorNoSettle();
+
+        vm.startPrank(admin);
+        pxt.setPoolManager(pm);
+        pxt.setSellAttributor(attributor);
+        vm.stopPrank();
+
+        uint256 amount = 100 * ONE;
+        uint256 donationBefore = pxt.balanceOf(donation);
+        vm.prank(alice);
+        pxt.transfer(pm, amount);
+
+        assertEq(pxt.balanceOf(pm), 97.3e6);
+        assertEq(pxt.balanceOf(donation), donationBefore + 1.45e6);
     }
 
     function test_feeExempt_sender_still_sell_locked() public {
@@ -336,16 +390,62 @@ contract PxtTest is Test {
         assertFalse(pxt.sellProtectionCleared());
     }
 
-    function test_eip7702_delegated_eoa_is_treated_as_wallet() public {
-        // 0xef0100 || 20-byte delegate target
+    function test_fake_7702_sized_contract_requires_allowlist() public {
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+        address fake = makeAddr("fake7702Contract");
+        vm.etch(fake, designation);
+
+        vm.prank(alice);
+        vm.expectRevert(Pxt.ContractRecipientNotApproved.selector);
+        pxt.transfer(fake, 100 * ONE);
+    }
+
+    function test_7702_shaped_recipient_allowed_after_multisig_approval() public {
         bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
         vm.etch(bob, designation);
 
-        uint256 amount = 100 * ONE;
-        vm.prank(alice);
-        pxt.transfer(bob, amount);
+        vm.prank(admin);
+        pxt.setApprovedContractRecipient(bob, true);
 
+        vm.prank(alice);
+        pxt.transfer(bob, 100 * ONE);
         assertEq(pxt.balanceOf(bob), 97.3e6);
+    }
+
+    function test_pool_manager_payout_to_7702_shaped_recipient() public {
+        address pm = makeAddr("poolManager");
+        address trader = makeAddr("trader7702");
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+
+        vm.etch(pm, hex"00");
+        vm.etch(trader, designation);
+
+        vm.startPrank(admin);
+        pxt.setPoolManager(pm);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        pxt.transfer(pm, 50 * ONE);
+
+        vm.prank(pm);
+        pxt.transfer(trader, 10 * ONE);
+        assertEq(pxt.balanceOf(trader), 10 * ONE);
+    }
+
+    function test_fee_collector_refund_to_owner_with_7702_code() public {
+        MockFeeCollectorShell collector = new MockFeeCollectorShell(admin);
+        bytes memory designation = hex"ef0100e6cae83bde06e4c305530e199d7217f42808555b";
+        vm.etch(admin, designation);
+
+        vm.startPrank(admin);
+        pxt.setFeeCollector(address(collector));
+        pxt.transfer(address(collector), 100 * ONE);
+        vm.stopPrank();
+
+        uint256 before = pxt.balanceOf(admin);
+        vm.prank(address(collector));
+        pxt.transfer(admin, 18);
+        assertEq(pxt.balanceOf(admin), before + 18);
     }
 
     function test_pool_manager_can_payout_to_contract_recipient() public {
@@ -379,5 +479,65 @@ contract PxtTest is Test {
         vm.prank(admin);
         vm.expectRevert(ZeroAddress.selector);
         pxt.setAntiBotSeller(address(0));
+    }
+
+    function test_setAntiBotSeller_one_shot() public {
+        address firstSeller = makeAddr("firstSeller");
+        address secondSeller = makeAddr("secondSeller");
+
+        vm.startPrank(admin);
+        pxt.setAntiBotSeller(firstSeller);
+        vm.expectRevert(Pxt.AntiBotSellerAlreadySet.selector);
+        pxt.setAntiBotSeller(secondSeller);
+        vm.stopPrank();
+
+        assertEq(pxt.antiBotSeller(), firstSeller);
+    }
+
+    function test_setAntiBotSeller_cannot_rearm_after_clear() public {
+        address firstSeller = makeAddr("firstSeller");
+        address secondSeller = makeAddr("secondSeller");
+
+        vm.prank(admin);
+        pxt.setAntiBotSeller(firstSeller);
+
+        vm.warp(pxt.sellUnlockTimestamp());
+        vm.prank(firstSeller);
+        pxt.clearSellProtection();
+        assertTrue(pxt.sellProtectionCleared());
+
+        vm.prank(admin);
+        vm.expectRevert(Pxt.SellProtectionAlreadyCleared.selector);
+        pxt.setAntiBotSeller(secondSeller);
+    }
+
+    function test_setFeeCollector_one_shot() public {
+        address firstCollector = makeAddr("firstCollector");
+        address secondCollector = makeAddr("secondCollector");
+        vm.etch(firstCollector, hex"00");
+        vm.etch(secondCollector, hex"00");
+
+        vm.startPrank(admin);
+        pxt.setFeeCollector(firstCollector);
+        vm.expectRevert(Pxt.FeeCollectorAlreadySet.selector);
+        pxt.setFeeCollector(secondCollector);
+        vm.stopPrank();
+
+        assertEq(pxt.feeCollector(), firstCollector);
+    }
+
+    function test_setSellAttributor_one_shot() public {
+        address firstAttributor = makeAddr("firstAttributor");
+        address secondAttributor = makeAddr("secondAttributor");
+        vm.etch(firstAttributor, hex"00");
+        vm.etch(secondAttributor, hex"00");
+
+        vm.startPrank(admin);
+        pxt.setSellAttributor(ISellAttributor(firstAttributor));
+        vm.expectRevert(Pxt.SellAttributorAlreadySet.selector);
+        pxt.setSellAttributor(ISellAttributor(secondAttributor));
+        vm.stopPrank();
+
+        assertEq(address(pxt.sellAttributor()), firstAttributor);
     }
 }

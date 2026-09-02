@@ -104,18 +104,23 @@ export const HOOK_ABI = [
   "function feeCollector() view returns (address)",
   // Dump window lives on the hook.
   "function sellWindows(address) view returns (uint64 windowStart, uint256 soldInWindow, uint256 balanceAtWindowStart)",
-  "function orphanSkim() view returns (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote)",
+  "function orphanSkim() view returns (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote, bool feeOnNet)",
   "function finalizeOrphanedSell()",
   "event HookFeeCharged(address indexed trader, uint8 kind, uint256 feeBps, uint256 feeAmount)",
   "event SellProtectionCleared()",
 ] as const;
 
 export const FEE_COLLECTOR_ABI = [
-  "function collect() returns (uint256 pulled0, uint256 pulled1)",
+  "function collect()",
   "function executeBuyback(uint256 usdcAmount, uint256 minPxtBought, uint256 deadline) returns (uint256 usdcSpent, uint256 pxtBought)",
+  "function isAuthorizedBuybackCaller(address caller) view returns (bool)",
   "function maxBuybackSlippageBps() view returns (uint16)",
+  "function frozenSqrtPriceX96() view returns (uint160)",
+  "function pendingSqrtPriceX96() view returns (uint160)",
+  "function pendingSpotBlock() view returns (uint256)",
   "function quoteBuyback() view returns (uint256 usdcSpendable, uint128 positionLiquidity)",
   "function pending(address token) view returns (uint256 donation, uint256 marketing, uint256 burnAmount, uint256 buyback)",
+  "function seedLiquidityAdded() view returns (bool)",
   "function recyclePxt() view returns (uint256)",
   "function lastRecycleTickLower() view returns (int24)",
   "function lastRecycleTickUpper() view returns (int24)",

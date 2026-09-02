@@ -43,14 +43,14 @@ help:
 	@echo "  make bootstrap-anvil                      Deploy PXT + PhoenixV4ReturnDeltaHook + FeeCollector"
 	@echo "  make bootstrap-return-delta-anvil         Alias → bootstrap-anvil"
 	@echo "  make set-wallet-statuses-anvil            Apply FEE_EXEMPT_WALLETS / NO_PENALTY_WALLETS (before lock)"
-	@echo "  make lock-anvil                           Renounce stack; hand Pxt roles to RECIPIENT_APPROVER"
+	@echo "  make lock-anvil                           Renounce stack; hand roles to RECIPIENT_APPROVER; require BUYBACK_CALLERS"
 	@echo "  make lock-rd-anvil                        Alias → lock-anvil"
 	@echo "  make status-anvil                         Spot, pending fees, buyback quote"
 	@echo "  make warp-anvil-unlock                    Warp past sellUnlockTimestamp"
 	@echo "  make open-trading-anvil                   Atomic clearSellProtection + anti-bot sell"
 	@echo "  make swap-anvil                           Swap (DIRECTION=buy|sell AMOUNT_WHOLE=...)"
 	@echo "  make collect-fees-anvil                   Pull LP fees → donation/marketing/burn"
-	@echo "  make execute-buyback-anvil                Cash / LP buyback via FeeCollector"
+	@echo "  make execute-buyback-anvil                Authorized executeBuyback (after lock: BUYBACK_CALLER_KEY)"
 	@echo "  make demo-buyback-anvil                   Full local buyback dry-run"
 	@echo "  make fund-testers-anvil / distribute-pxt-anvil / web-dev"
 	@echo ""
@@ -166,12 +166,16 @@ _warp-anvil-unlock-inner:
 	@test -f $(EVM_DIR)/.env.anvil || (echo "Missing evm/.env.anvil - run make bootstrap-anvil" && exit 1)
 	@bash $(EVM_DIR)/scripts/warp-anvil-unlock.sh $(EVM_DIR)/.env.anvil
 
-# Final ceremony: assert LP + floor + buyback cap, hand Pxt roles to RECIPIENT_APPROVER
-# (multisig), renounce FeeCollector → Hook → Pxt Ownable. Collect/buyback stay permissionless;
+# Final ceremony: assert LP + buyback slippage, hand Pxt + FeeCollector AccessControl roles
+# to RECIPIENT_APPROVER (multisig), authorize BUYBACK_CALLERS, clear deployer as
+# executeBuyback caller, renounce FeeCollector → Hook → Pxt Ownable.
+# collect() stays permissionless; executeBuyback requires isAuthorizedBuybackCaller.
 # setApprovedContractRecipient stays on RECIPIENT_APPROVER_ROLE.
-# Requires sellAttributor == hook. Optional env: BUYBACK_*, RECIPIENT_APPROVER (default Anvil #4)
+# Requires sellAttributor == hook. Env: BUYBACK_CALLERS (default Anvil #5), RECIPIENT_APPROVER (default Anvil #4)
 # Apply wallet status lists first if needed: make set-wallet-statuses-anvil
 ANVIL_RECIPIENT_APPROVER ?= 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
+# Anvil account #5 — default post-lock executeBuyback keeper (not the deployer).
+ANVIL_BUYBACK_CALLER ?= 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
 lock-rd-anvil: lock-anvil
 
 set-wallet-statuses-anvil: evm-build
@@ -194,6 +198,7 @@ _lock-anvil-inner:
 	@test -n "$(PXT_ADDRESS)" || (echo "PXT_ADDRESS missing" && exit 1)
 	cd $(EVM_DIR) && PRIVATE_KEY="$(or $(PRIVATE_KEY),$(ANVIL_DEFAULT_KEY))" \
 		RECIPIENT_APPROVER="$(or $(RECIPIENT_APPROVER),$(ANVIL_RECIPIENT_APPROVER))" \
+		BUYBACK_CALLERS="$(or $(BUYBACK_CALLERS),$(ANVIL_BUYBACK_CALLER))" \
 		forge script script/LockProtocolReturnDelta.s.sol:LockProtocolReturnDelta \
 		--rpc-url anvil --broadcast -vvvv
 
@@ -221,7 +226,7 @@ execute-buyback-anvil: evm-build
 _execute-buyback-anvil-inner:
 	@test -f $(EVM_DIR)/.env.anvil || (echo "Missing evm/.env.anvil - run make bootstrap-anvil" && exit 1)
 	@test -n "$(FEE_COLLECTOR)" || (echo "FEE_COLLECTOR missing - run make bootstrap-anvil" && exit 1)
-	cd $(EVM_DIR) && PRIVATE_KEY="$(or $(PRIVATE_KEY),$(ANVIL_DEFAULT_KEY))" \
+	cd $(EVM_DIR) && PRIVATE_KEY="$(or $(BUYBACK_CALLER_KEY),$(PRIVATE_KEY),$(ANVIL_DEFAULT_KEY))" \
 		MIN_PXT_BOUGHT="$(or $(MIN_PXT_BOUGHT),0)" \
 		DEADLINE_SECONDS="$(or $(DEADLINE_SECONDS),600)" \
 		forge script script/ExecuteBuyback.s.sol:ExecuteBuyback \

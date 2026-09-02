@@ -21,6 +21,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
 
 import {Pxt} from "../src/core/Pxt.sol";
@@ -118,8 +119,8 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         pxt.setPoolManager(address(manager));
 
         uint160 flags = uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
         (address hookAddr, bytes32 salt) = HookMiner.find(
             address(this), flags, type(PhoenixV4ReturnDeltaHook).creationCode, abi.encode(manager, pxt, antiBot, admin)
@@ -153,6 +154,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         hook.setOfficialPool(key);
         feeCollector.configurePool(key, TICK_LOWER, TICK_UPPER, bytes32(0));
         feeCollector.setBuybackParams(10, 200);
+        feeCollector.setAuthorizedBuybackCaller(address(this), true);
 
         uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(0);
         manager.initialize(key, sqrtPrice);
@@ -184,6 +186,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
     function test_hook_flags_have_return_delta() public view {
         uint160 f = hook.flags();
         assertEq(f & Hooks.BEFORE_ADD_LIQUIDITY_FLAG, Hooks.BEFORE_ADD_LIQUIDITY_FLAG);
+        assertEq(f & Hooks.AFTER_ADD_LIQUIDITY_FLAG, Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         assertEq(f & Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG, Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG);
         assertEq(f & Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG, Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG);
         assertEq(f & Hooks.BEFORE_SWAP_FLAG, Hooks.BEFORE_SWAP_FLAG);
@@ -223,6 +226,36 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Shared lpRouter sender is never FeeCollector — admin cannot bypass via POSM (RAAAU).
+    function test_lp_gate_blocks_router_even_for_admin() public {
+        uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(0);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPrice,
+            TickMath.getSqrtPriceAtTick(TICK_LOWER),
+            TickMath.getSqrtPriceAtTick(TICK_UPPER),
+            100 * WHOLE,
+            100 * WHOLE
+        );
+
+        vm.startPrank(admin);
+        musdc.mint(admin, 1_000 * WHOLE);
+        pxt.transfer(admin, 1_000 * WHOLE);
+        IERC20(address(pxt)).approve(address(lpRouter), type(uint256).max);
+        musdc.approve(address(lpRouter), type(uint256).max);
+        vm.expectRevert();
+        lpRouter.modifyLiquidity(
+            key,
+            ModifyLiquidityParams({
+                tickLower: TICK_LOWER,
+                tickUpper: TICK_UPPER,
+                liquidityDelta: int256(uint256(liquidity)),
+                salt: bytes32(uint256(99))
+            }),
+            abi.encode(admin)
+        );
+        vm.stopPrank();
+    }
+
     function test_lp_gate_allows_stranger_after_sell_unlock() public {
         address stranger = makeAddr("stranger");
         vm.startPrank(admin);
@@ -231,8 +264,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.stopPrank();
 
         vm.warp(sellUnlock);
-        // Public LP settle is user→PoolManager; anti-bot must be cleared first.
-        _clearAntiBot();
+        // LP settle is attested inbound, not a DEX sell — anti-bot need not be cleared.
 
         uint160 sqrtPrice = TickMath.getSqrtPriceAtTick(0);
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
@@ -246,6 +278,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.startPrank(stranger);
         IERC20(address(pxt)).approve(address(lpRouter), type(uint256).max);
         musdc.approve(address(lpRouter), type(uint256).max);
+        uint256 donationBefore = pxt.balanceOf(donation);
         lpRouter.modifyLiquidity(
             key,
             ModifyLiquidityParams({
@@ -257,6 +290,25 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
             abi.encode(stranger)
         );
         vm.stopPrank();
+        assertEq(pxt.balanceOf(donation), donationBefore);
+    }
+
+    /// @dev Naked user→PoolManager (no swap / LP) pays the 2.7% transfer tax (PTTB).
+    function test_transfer_to_pool_manager_without_swap_pays_tax() public {
+        _openSells();
+        uint256 amount = 100 * WHOLE;
+        uint256 donationBefore = pxt.balanceOf(donation);
+        uint256 marketingBefore = pxt.balanceOf(marketing);
+        uint256 pmBefore = pxt.balanceOf(address(manager));
+
+        vm.prank(alice);
+        pxt.transfer(address(manager), amount);
+
+        uint256 expectDon = (amount * PxtFeeModel.BUY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (amount * PxtFeeModel.TRANSFER_FEE_BPS) / PxtFeeModel.BPS - expectDon;
+        assertEq(pxt.balanceOf(address(manager)), pmBefore + amount - expectDon - expectMkt);
+        assertEq(pxt.balanceOf(donation), donationBefore + expectDon);
+        assertEq(pxt.balanceOf(marketing), marketingBefore + expectMkt);
     }
 
     function test_buy_skims_usdc_to_fee_collector() public {
@@ -283,6 +335,14 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.prank(admin);
         vm.expectRevert(PhoenixBuyback.HookAlreadySet.selector);
         feeCollector.setHook(makeAddr("otherHook"));
+    }
+
+    function test_addLiquidity_is_one_shot() public {
+        assertTrue(feeCollector.seedLiquidityAdded());
+
+        vm.prank(admin);
+        vm.expectRevert(PhoenixBuyback.LiquidityAlreadySeeded.selector);
+        feeCollector.addLiquidity(1, 1, 1, abi.encode(address(feeCollector)));
     }
 
     function test_buy_fee_exempt_still_pays_usdc_fee() public {
@@ -443,7 +503,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         );
         vm.stopPrank();
 
-        (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote) = hook.orphanSkim();
+        (uint128 pxtIn, uint128 usdcOut, uint128 usdcSkim, address quote,) = hook.orphanSkim();
         assertGt(usdcSkim, 0);
         assertEq(quote, address(musdc));
         assertGt(pxtIn, 0);
@@ -454,7 +514,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
 
         hook.finalizeOrphanedSell();
 
-        (,, uint128 skimLeft,) = hook.orphanSkim();
+        (,, uint128 skimLeft,,) = hook.orphanSkim();
         assertEq(skimLeft, 0);
         assertEq(musdc.balanceOf(address(hook)), hookUsdcBefore);
         (,,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
@@ -477,7 +537,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.expectRevert();
         probe.attack(key, params, abi.encode(alice), PendingSellUnlockProbe.AfterFirst.SecondSwap);
 
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0); // whole unlock reverted — no leftover orphan
     }
 
@@ -496,7 +556,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         vm.expectRevert();
         probe.attack(key, params, abi.encode(alice), PendingSellUnlockProbe.AfterFirst.Finalize);
 
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0);
     }
 
@@ -514,7 +574,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceUsdcBefore);
         (,,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
         assertEq(pendBbAfter, pendBbBefore);
-        (,, uint128 skim,) = hook.orphanSkim();
+        (,, uint128 skim,,) = hook.orphanSkim();
         assertEq(skim, 0);
     }
 
@@ -736,6 +796,66 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(pendBb, (usdcOutGross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS);
     }
 
+    /// @dev Same-tx PoolManager→seller PXT (flash take) must not inflate the dump-window snapshot.
+    function test_dump_window_excludes_same_tx_pool_manager_credit() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        uint256 flash = 1_000_000 * WHOLE;
+        vm.prank(admin);
+        pxt.transfer(address(manager), flash);
+
+        uint256 aliceBefore = pxt.balanceOf(alice);
+        vm.prank(address(manager));
+        pxt.transfer(alice, flash);
+
+        _sell(alice, 1 * WHOLE);
+        (,, uint256 snap) = hook.sellWindows(alice);
+        assertEq(snap, aliceBefore);
+    }
+
+    /// @dev After holdings drop, later sells use the smaller bag (not the first-sale snapshot).
+    function test_dump_window_ratchets_down_when_balance_drops() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        _sell(alice, 1 * WHOLE);
+        (,, uint256 snap0) = hook.sellWindows(alice);
+        assertGt(snap0, 50_000 * WHOLE);
+
+        address buddy = makeAddr("dumpBuddy");
+        uint256 sendOut = 80_000 * WHOLE;
+        vm.prank(alice);
+        pxt.transfer(buddy, sendOut);
+
+        uint256 aliceLeft = pxt.balanceOf(alice);
+        uint256 secondSell = (aliceLeft * 15) / 100;
+        assertGt(secondSell, 0);
+        // 15% of remaining is still << 10% of the original ~100k snapshot.
+        assertLt(secondSell * PxtFeeModel.BPS, snap0 * PxtFeeModel.PENALTY_THRESHOLD_BPS);
+
+        (uint256 don0, uint256 mkt0,, uint256 bb0) = feeCollector.pending(address(musdc));
+        uint256 aliceMusdcBefore = musdc.balanceOf(alice);
+        _sell(alice, secondSell);
+
+        (,, uint256 snap1) = hook.sellWindows(alice);
+        assertEq(snap1, aliceLeft);
+
+        (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
+        uint256 usdcSkimmed = (pendDon - don0) + (pendMkt - mkt0) + (pendBb - bb0);
+        uint256 usdcOutGross = musdc.balanceOf(alice) - aliceMusdcBefore + usdcSkimmed;
+        uint256 expectBb =
+            (usdcOutGross * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS
+            - (usdcOutGross * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS
+            - (usdcOutGross * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
+        assertEq(pendBb - bb0, expectBb);
+        assertGt(pendBb - bb0, (usdcOutGross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS);
+    }
+
     /// @dev Exact-out settle is swapPxt + burn; attribution must use that size (not swap-only).
     function test_exact_out_sell_attributes_and_burns() public {
         vm.prank(admin);
@@ -756,9 +876,11 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceMusdcBefore);
 
         (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
-        uint256 expectDon = (usdcOut * PxtFeeModel.SELL_DONATION_BPS) / PxtFeeModel.BPS;
-        uint256 expectMkt = (usdcOut * PxtFeeModel.SELL_MARKETING_BPS) / PxtFeeModel.BPS;
-        uint256 expectBb = (usdcOut * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
+        uint256 gross =
+            usdcOut + (usdcOut * PxtFeeModel.SELL_USDC_FEE_BPS) / (PxtFeeModel.BPS - PxtFeeModel.SELL_USDC_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.SELL_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.SELL_MARKETING_BPS) / PxtFeeModel.BPS;
+        uint256 expectBb = (gross * PxtFeeModel.SELL_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
         assertEq(pendDon, expectDon);
         assertEq(pendMkt, expectMkt);
         assertEq(pendBb, expectBb);
@@ -779,12 +901,17 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(musdc.balanceOf(alice), aliceMusdcBefore);
 
         (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
-        uint256 expectDon = (usdcOut * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS;
-        uint256 expectMkt = (usdcOut * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
-        uint256 expectBb = (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
+        uint256 gross =
+            usdcOut + (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS)
+            / (PxtFeeModel.BPS - PxtFeeModel.PENALTY_USDC_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.PENALTY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.PENALTY_MARKETING_BPS) / PxtFeeModel.BPS;
+        uint256 expectBb = (gross * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS - expectDon - expectMkt;
         assertEq(pendDon, expectDon);
         assertEq(pendMkt, expectMkt);
         assertEq(pendBb, expectBb);
+        // Published 35.95% of total USDC flow, not 35.95% of the net exact-out (RIFM).
+        assertGt(pendDon + pendMkt + pendBb, (usdcOut * PxtFeeModel.PENALTY_USDC_FEE_BPS) / PxtFeeModel.BPS);
     }
 
     function test_exact_out_fee_exempt_refunds_usdc_still_burns() public {
@@ -810,6 +937,170 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(pendBb, 0);
     }
 
+    /// @dev Exact-in sell at a tight limit must burn/fee the fill, not the requested size (RIFM).
+    function test_exact_in_sell_partial_fill_burns_actual() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        _openSells();
+        _sell(antiBot, 1 * WHOLE);
+
+        vm.startPrank(admin);
+        pxt.setWalletStatus(alice, Pxt.WalletStatus.FeeExempt);
+        pxt.transfer(alice, 5_000_000 * WHOLE);
+        pxt.setWalletStatus(alice, Pxt.WalletStatus.Normal);
+        vm.stopPrank();
+
+        uint256 request = 5_000_000 * WHOLE;
+        uint256 requestBurn = (request * PxtFeeModel.SELL_BURN_BPS) / PxtFeeModel.BPS;
+        uint256 supplyBefore = pxt.totalSupply();
+        uint256 aliceBefore = pxt.balanceOf(alice);
+
+        bool zeroForOne = Currency.unwrap(key.currency0) == address(pxt);
+        (, int24 tick,,) = manager.getSlot0(key.toId());
+        int24 limitTick = zeroForOne ? tick - TICK_SPACING : tick + TICK_SPACING;
+        uint160 limit = TickMath.getSqrtPriceAtTick(limitTick);
+
+        vm.startPrank(alice);
+        IERC20(address(pxt)).approve(address(swapRouter), type(uint256).max);
+        swapRouter.swap(
+            key,
+            SwapParams({zeroForOne: zeroForOne, amountSpecified: -request.toInt256(), sqrtPriceLimitX96: limit}),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            abi.encode(alice)
+        );
+        vm.stopPrank();
+
+        uint256 burned = supplyBefore - pxt.totalSupply();
+        uint256 spent = aliceBefore - pxt.balanceOf(alice);
+        assertLt(spent, request);
+        assertLt(burned, requestBurn);
+        uint256 poolPxt = spent - burned;
+        assertEq(burned, (poolPxt * PxtFeeModel.SELL_BURN_BPS) / (PxtFeeModel.BPS - PxtFeeModel.SELL_BURN_BPS));
+    }
+
+    /// @dev Exact-out buy: 2.7% of total USDC paid, not 2.7% of the pool leg (RIFM).
+    function test_exact_out_buy_grosses_up_usdc_fee() public {
+        uint256 pxtOut = 1_000 * WHOLE;
+        uint256 aliceMusdcBefore = musdc.balanceOf(alice);
+        uint256 alicePxtBefore = pxt.balanceOf(alice);
+
+        bool zeroForOne = Currency.unwrap(key.currency0) == address(musdc);
+        vm.startPrank(alice);
+        musdc.approve(address(swapRouter), type(uint256).max);
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: pxtOut.toInt256(),
+                sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            abi.encode(alice)
+        );
+        vm.stopPrank();
+
+        uint256 usdcPaid = aliceMusdcBefore - musdc.balanceOf(alice);
+        (uint256 pendDon, uint256 pendMkt,,) = feeCollector.pending(address(musdc));
+        uint256 fee = pendDon + pendMkt;
+        uint256 poolUsdc = usdcPaid - fee;
+        uint256 gross = poolUsdc + (poolUsdc * PxtFeeModel.BUY_FEE_BPS) / (PxtFeeModel.BPS - PxtFeeModel.BUY_FEE_BPS);
+        uint256 expectDon = (gross * PxtFeeModel.BUY_DONATION_BPS) / PxtFeeModel.BPS;
+        uint256 expectMkt = (gross * PxtFeeModel.BUY_FEE_BPS) / PxtFeeModel.BPS - expectDon;
+        assertEq(pendDon, expectDon);
+        assertEq(pendMkt, expectMkt);
+        assertGt(fee, (poolUsdc * PxtFeeModel.BUY_FEE_BPS) / PxtFeeModel.BPS);
+        assertEq(pxt.balanceOf(alice), alicePxtBefore + pxtOut);
+    }
+
+    function test_unauthorized_buyback_reverts() public {
+        _accrueBuybackPending();
+
+        address stranger = makeAddr("buybackStranger");
+        vm.prank(stranger);
+        vm.expectRevert(PhoenixBuyback.UnauthorizedBuybackCaller.selector);
+        feeCollector.executeBuyback(1, 0, block.timestamp + 1);
+    }
+
+    function test_constructor_authorizes_admin_as_buyback_caller() public view {
+        assertTrue(feeCollector.isAuthorizedBuybackCaller(admin));
+        assertTrue(feeCollector.hasRole(feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE(), admin));
+    }
+
+    function test_setAuthorizedBuybackCaller_requires_approver_role() public {
+        address ops = makeAddr("buybackOps");
+        address multisig = makeAddr("buybackMultisig");
+        bytes32 approverRole = feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE();
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, approverRole)
+        );
+        feeCollector.setAuthorizedBuybackCaller(ops, true);
+
+        vm.startPrank(admin);
+        feeCollector.grantRole(approverRole, multisig);
+        feeCollector.grantRole(feeCollector.DEFAULT_ADMIN_ROLE(), multisig);
+        feeCollector.revokeRole(approverRole, admin);
+        feeCollector.renounceRole(feeCollector.DEFAULT_ADMIN_ROLE(), admin);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, approverRole)
+        );
+        feeCollector.setAuthorizedBuybackCaller(ops, true);
+
+        vm.prank(multisig);
+        feeCollector.setAuthorizedBuybackCaller(ops, true);
+        assertTrue(feeCollector.isAuthorizedBuybackCaller(ops));
+    }
+
+    function test_buyback_approver_role_survives_ownable_renounce() public {
+        address multisig = makeAddr("buybackMultisig");
+        address keeper = makeAddr("buybackKeeper");
+        bytes32 approverRole = feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE();
+
+        vm.startPrank(admin);
+        feeCollector.grantRole(approverRole, multisig);
+        feeCollector.grantRole(feeCollector.DEFAULT_ADMIN_ROLE(), multisig);
+        feeCollector.revokeRole(approverRole, admin);
+        feeCollector.renounceRole(feeCollector.DEFAULT_ADMIN_ROLE(), admin);
+        feeCollector.renounceOwnership();
+        vm.stopPrank();
+
+        assertEq(feeCollector.owner(), address(0));
+        assertTrue(feeCollector.hasRole(approverRole, multisig));
+
+        vm.prank(multisig);
+        feeCollector.setAuthorizedBuybackCaller(keeper, true);
+        assertTrue(feeCollector.isAuthorizedBuybackCaller(keeper));
+
+        uint256 pendBb = _accrueBuybackPending();
+        _rollBuybackRef();
+        vm.prank(keeper);
+        feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
+    }
+
+    function test_revoked_buyback_caller_cannot_execute() public {
+        address ops = makeAddr("buybackOps");
+        vm.prank(admin);
+        feeCollector.setAuthorizedBuybackCaller(ops, true);
+
+        uint256 pendBb = _accrueBuybackPending();
+
+        _rollBuybackRef();
+        vm.prank(ops);
+        feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
+
+        vm.prank(admin);
+        feeCollector.setAuthorizedBuybackCaller(ops, false);
+        assertFalse(feeCollector.isAuthorizedBuybackCaller(ops));
+
+        vm.prank(ops);
+        vm.expectRevert(PhoenixBuyback.UnauthorizedBuybackCaller.selector);
+        feeCollector.executeBuyback(1, 0, block.timestamp + 1);
+    }
+
     function test_partial_usdc_buyback() public {
         vm.prank(admin);
         pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
@@ -824,10 +1115,36 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(pendBb, 1);
         uint256 half = pendBb / 2;
 
+        _rollBuybackRef();
         feeCollector.executeBuyback(half, 0, block.timestamp + 1);
         (,,, uint256 pendAfter) = feeCollector.pending(address(musdc));
         assertEq(pendAfter, pendBb - half);
         assertGt(feeCollector.recyclePxt(), 0);
+    }
+
+    /// @dev Price-limit partial fill must debit pending by actual USDC spent, not requested budget.
+    function test_buyback_partial_fill_keeps_pending() public {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        vm.warp(sellUnlock);
+        _clearAntiBot();
+        _sell(antiBot, 1 * WHOLE);
+        _sell(alice, 100_000 * WHOLE);
+        feeCollector.collect();
+        (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
+        assertGt(pendBb, 100 * WHOLE);
+
+        vm.prank(admin);
+        feeCollector.setBuybackParams(10, 1);
+
+        _rollBuybackRef();
+        (uint256 spent,) = feeCollector.executeBuyback(0, 0, block.timestamp + 1);
+        (,,, uint256 pendAfter) = feeCollector.pending(address(musdc));
+
+        assertGt(spent, 0);
+        assertLt(spent, pendBb);
+        assertEq(pendAfter, pendBb - spent);
+        assertGt(pendAfter, 0);
     }
 
     /// @dev Protocol buyback must not re-accrue the 2.7% buy skim (FeeCollector is swap sender).
@@ -845,6 +1162,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(pendBb, 1);
 
         uint256 spend = pendBb / 2;
+        _rollBuybackRef();
         feeCollector.executeBuyback(spend, 0, block.timestamp + 1);
 
         (uint256 donAfter, uint256 mktAfter,, uint256 pendAfter) = feeCollector.pending(address(musdc));
@@ -855,28 +1173,7 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertGt(feeCollector.recyclePxt(), 0);
     }
 
-    function test_recycle_band_cap_and_prune() public {
-        vm.prank(admin);
-        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
-        vm.warp(sellUnlock);
-        _clearAntiBot();
-
-        assertEq(feeCollector.MAX_RECYCLE_BANDS(), 32);
-
-        _sell(antiBot, 1 * WHOLE);
-        _sell(alice, 2_000 * WHOLE);
-        feeCollector.collect();
-        (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
-        assertGt(pendBb, 0);
-        feeCollector.executeBuyback(0, 0, block.timestamp + 1);
-        assertEq(feeCollector.recycleBandCount(), 1);
-        assertEq(feeCollector.pruneEmptyRecycleBands(), 0);
-        assertEq(feeCollector.recycleBandCount(), 1);
-        assertLe(feeCollector.recycleBandCount(), uint256(feeCollector.MAX_RECYCLE_BANDS()));
-    }
-
-    /// @dev Full registry + price into recycle bands → reuse must not mint quote-side / drain USDC.
-    function test_recycle_reuse_reverts_when_bands_not_pxt_only() public {
+    function test_recycle_mints_after_spot_moves() public {
         vm.startPrank(admin);
         feeCollector.setBuybackParams(1, 5_000);
         pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
@@ -886,79 +1183,58 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
 
         _openSells();
         _sell(antiBot, 1 * WHOLE);
-        // Normal seller so USDC skims accrue (FeeExempt refunds sell skims).
         _sell(alice, 50_000 * WHOLE);
         feeCollector.collect();
 
         (uint256 pendDon0, uint256 pendMkt0,, uint256 pendBb0) = feeCollector.pending(address(musdc));
         assertGt(pendBb0, 0);
 
-        uint256 maxBands = feeCollector.MAX_RECYCLE_BANDS();
-        uint256 spendPer = pendBb0 / (maxBands + 2);
+        uint256 spendPer = pendBb0 / 4;
         assertGt(spendPer, 0);
 
         bool pxtIsToken0 = Currency.unwrap(key.currency0) == address(pxt);
+        (, int24 tickBefore,,) = manager.getSlot0(key.toId());
+        int24 floorBefore = PhoenixBuybackMath.floorToSpacing(tickBefore, TICK_SPACING);
 
-        for (uint256 i = 0; i < maxBands; i++) {
-            (, int24 tickBefore,,) = manager.getSlot0(key.toId());
-            int24 floorBefore = PhoenixBuybackMath.floorToSpacing(tickBefore, TICK_SPACING);
+        _rollBuybackRef();
+        feeCollector.executeBuyback(spendPer, 0, block.timestamp + 1);
+        int24 firstLo = feeCollector.lastRecycleTickLower();
+        int24 firstHi = feeCollector.lastRecycleTickUpper();
+        uint256 recycleAfterFirst = feeCollector.recyclePxt();
+        assertGt(recycleAfterFirst, 0);
+        (, int24 tickAfterMint,,) = manager.getSlot0(key.toId());
+        assertTrue(PhoenixBuybackMath.isPxtOnlyBand(tickAfterMint, firstLo, firstHi, pxtIsToken0));
 
-            feeCollector.executeBuyback(spendPer, 0, block.timestamp + 1);
-            assertEq(feeCollector.recycleBandCount(), i + 1);
-
-            // Push spot toward the recycle side until the next ideal band would differ.
-            uint256 guard;
-            while (guard < 40) {
-                _buy(alice, 50_000 * WHOLE);
-                (, int24 tickAfter,,) = manager.getSlot0(key.toId());
-                int24 floorAfter = PhoenixBuybackMath.floorToSpacing(tickAfter, TICK_SPACING);
-                if (pxtIsToken0) {
-                    if (floorAfter > floorBefore) break;
-                } else if (floorAfter < floorBefore) {
-                    break;
-                }
-                unchecked {
-                    ++guard;
-                }
+        uint256 guard;
+        while (guard < 40) {
+            _buy(alice, 50_000 * WHOLE);
+            (, int24 tickAfter,,) = manager.getSlot0(key.toId());
+            int24 floorAfter = PhoenixBuybackMath.floorToSpacing(tickAfter, TICK_SPACING);
+            if (pxtIsToken0) {
+                if (floorAfter > floorBefore) break;
+            } else if (floorAfter < floorBefore) {
+                break;
             }
-            require(guard < 40, "spot did not advance");
-        }
-
-        assertEq(feeCollector.recycleBandCount(), maxBands);
-
-        // Cross remaining PXT-only bands so reuse has nowhere safe to mint.
-        uint256 guard2;
-        while (_hasPxtOnlyRecycleBand(pxtIsToken0) && guard2 < 80) {
-            _buy(alice, 100_000 * WHOLE);
             unchecked {
-                ++guard2;
+                ++guard;
             }
         }
-        assertFalse(_hasPxtOnlyRecycleBand(pxtIsToken0));
+        require(guard < 40, "spot did not advance");
 
         (uint256 pendDon, uint256 pendMkt,, uint256 pendBb) = feeCollector.pending(address(musdc));
         uint256 usdcBal = musdc.balanceOf(address(feeCollector));
 
-        vm.expectRevert(PhoenixBuyback.RecycleBandNotPxtOnly.selector);
+        _rollBuybackRef();
         feeCollector.executeBuyback(spendPer, 0, block.timestamp + 1);
 
         (uint256 pendDonAfter, uint256 pendMktAfter,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
         assertEq(pendDonAfter, pendDon);
         assertEq(pendMktAfter, pendMkt);
-        assertEq(pendBbAfter, pendBb);
-        assertEq(musdc.balanceOf(address(feeCollector)), usdcBal);
+        assertEq(pendBbAfter, pendBb - spendPer);
+        assertGt(feeCollector.recyclePxt(), recycleAfterFirst);
         // Donation/marketing pending from the initial sell must still be solvent on the collector.
-        assertGe(usdcBal, pendDon0 + pendMkt0 + pendBbAfter);
-    }
-
-    function _hasPxtOnlyRecycleBand(bool pxtIsToken0) internal view returns (bool) {
-        (, int24 tick,,) = manager.getSlot0(key.toId());
-        uint256 n = feeCollector.recycleBandCount();
-        for (uint256 i = 0; i < n; i++) {
-            (int24 lo, int24 hi) = feeCollector.recycleBands(i);
-            if (PhoenixBuybackMath.isPxtOnlyBand(tick, lo, hi, pxtIsToken0)) return true;
-        }
-        return false;
+        assertGe(musdc.balanceOf(address(feeCollector)), pendDon0 + pendMkt0 + pendBbAfter);
+        assertGe(usdcBal, pendDon0 + pendMkt0 + pendBb);
     }
 
     function test_receive_accrued_fees_ignores_non_pxt_burn() public {
@@ -1011,6 +1287,35 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(musdc.balanceOf(address(feeCollector)), bogusBurn);
     }
 
+    function test_collect_reserves_pending_buyback() public {
+        uint256 donationAmt = 10 * WHOLE;
+        uint256 marketingAmt = 10 * WHOLE;
+        uint256 buybackAmt = 80 * WHOLE;
+
+        vm.prank(admin);
+        musdc.mint(address(hook), donationAmt + marketingAmt + buybackAmt);
+
+        vm.startPrank(address(hook));
+        musdc.approve(address(feeCollector), type(uint256).max);
+        feeCollector.receiveAccruedFees(address(musdc), FeeKind.Sell, donationAmt, marketingAmt, 0, buybackAmt);
+        vm.stopPrank();
+
+        deal(address(musdc), address(feeCollector), 50 * WHOLE);
+
+        uint256 donationBefore = musdc.balanceOf(donation);
+        uint256 marketingBefore = musdc.balanceOf(marketing);
+        feeCollector.collect();
+
+        assertEq(musdc.balanceOf(donation), donationBefore);
+        assertEq(musdc.balanceOf(marketing), marketingBefore);
+        (uint256 pendDon, uint256 pendMkt, uint256 pendBurn, uint256 pendBb) = feeCollector.pending(address(musdc));
+        assertEq(pendDon, 0);
+        assertEq(pendMkt, 0);
+        assertEq(pendBurn, 0);
+        assertEq(pendBb, 50 * WHOLE);
+        assertEq(musdc.balanceOf(address(feeCollector)), 50 * WHOLE);
+    }
+
     function test_pool_manager_settlement_is_fee_free_on_token() public view {
         assertEq(pxt.poolManager(), address(manager));
         assertTrue(pxt.isApprovedContractRecipient(address(manager)));
@@ -1024,6 +1329,24 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
     function test_lock_protocol_requires_matching_fee_wallets() public {
         LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
         locker.requireMatchingFeeWallets(pxt, feeCollector);
+    }
+
+    function test_lock_protocol_requires_pxt_fee_collector() public {
+        LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
+        locker.requirePxtFeeCollector(pxt, address(feeCollector));
+    }
+
+    function test_lock_protocol_rejects_mismatched_pxt_fee_collector() public {
+        Pxt fresh = new Pxt(admin, donation, marketing, sellUnlock);
+        address wrongCollector = makeAddr("wrongCollector");
+        vm.etch(wrongCollector, hex"00");
+
+        vm.prank(admin);
+        fresh.setFeeCollector(wrongCollector);
+
+        LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
+        vm.expectRevert(LockProtocolReturnDelta.FeeCollectorMismatch.selector);
+        locker.requirePxtFeeCollector(fresh, address(feeCollector));
     }
 
     function test_lock_protocol_rejects_mismatched_fee_wallets() public {
@@ -1062,35 +1385,43 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
 
         (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
         assertGt(pendBb, 1);
+        _rollBuybackRef();
         feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
         (,,, uint256 pendAfter) = feeCollector.pending(address(musdc));
         assertEq(pendAfter, pendBb - pendBb / 2);
     }
 
     function test_lock_protocol_rejects_wrong_sell_attributor() public {
+        Pxt fresh = new Pxt(admin, donation, marketing, sellUnlock);
         LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
         address stranger = makeAddr("wrongAttributor");
         vm.etch(stranger, hex"00");
 
         vm.prank(admin);
-        pxt.setSellAttributor(ISellAttributor(stranger));
+        fresh.setSellAttributor(ISellAttributor(stranger));
 
         vm.expectRevert(LockProtocolReturnDelta.SellAttributorMustBeHook.selector);
-        locker.requireSellAttributorIsHook(pxt, address(hook));
+        locker.requireSellAttributorIsHook(fresh, address(hook));
     }
 
     function test_lock_renounce_keeps_collect_and_blocks_admin() public {
         address multisig = makeAddr("multisig");
         address stranger = makeAddr("stranger");
+        address keeper = makeAddr("postLockKeeper");
 
         (, uint128 positionLiq) = feeCollector.quoteBuyback();
         assertGt(positionLiq, 0);
         vm.prank(admin);
         feeCollector.setBuybackParams(10, 200);
 
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        vm.warp(sellUnlock);
+        _clearAntiBot();
+
         LockProtocolReturnDelta locker = new LockProtocolReturnDelta();
         locker.requireSellAttributorIsHook(pxt, address(hook));
-        assertTrue(hook.liquidityProvider(address(feeCollector)));
+        assertEq(address(hook.feeCollector()), address(feeCollector));
         assertGt(feeCollector.maxBuybackSlippageBps(), 0);
 
         vm.startPrank(admin);
@@ -1098,6 +1429,13 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         pxt.grantRole(pxt.DEFAULT_ADMIN_ROLE(), multisig);
         pxt.revokeRole(pxt.RECIPIENT_APPROVER_ROLE(), admin);
         pxt.renounceRole(pxt.DEFAULT_ADMIN_ROLE(), admin);
+
+        feeCollector.grantRole(feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE(), multisig);
+        feeCollector.grantRole(feeCollector.DEFAULT_ADMIN_ROLE(), multisig);
+        feeCollector.setAuthorizedBuybackCaller(keeper, true);
+        feeCollector.setAuthorizedBuybackCaller(admin, false);
+        feeCollector.revokeRole(feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE(), admin);
+        feeCollector.renounceRole(feeCollector.DEFAULT_ADMIN_ROLE(), admin);
 
         feeCollector.renounceOwnership();
         hook.renounceOwnership();
@@ -1108,6 +1446,10 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(hook.owner(), address(0));
         assertEq(pxt.owner(), address(0));
         assertTrue(pxt.hasRole(pxt.RECIPIENT_APPROVER_ROLE(), multisig));
+        assertTrue(feeCollector.hasRole(feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE(), multisig));
+        assertTrue(feeCollector.hasRole(feeCollector.DEFAULT_ADMIN_ROLE(), multisig));
+        assertFalse(feeCollector.isAuthorizedBuybackCaller(admin));
+        assertTrue(feeCollector.isAuthorizedBuybackCaller(keeper));
         assertEq(address(pxt.sellAttributor()), address(hook));
 
         uint256 amountIn = 1_000 * WHOLE;
@@ -1119,10 +1461,91 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         feeCollector.collect();
         assertEq(musdc.balanceOf(donation), donationBefore + expectDon);
 
+        vm.prank(stranger);
+        vm.expectRevert(PhoenixBuyback.UnauthorizedBuybackCaller.selector);
+        feeCollector.executeBuyback(1, 0, block.timestamp + 1);
+
+        vm.prank(admin);
+        vm.expectRevert(PhoenixBuyback.UnauthorizedBuybackCaller.selector);
+        feeCollector.executeBuyback(1, 0, block.timestamp + 1);
+
+        _sell(alice, 500 * WHOLE);
+        feeCollector.collect();
+        (,,, uint256 pendBb) = feeCollector.pending(address(musdc));
+        assertGt(pendBb, 0);
+
+        _rollBuybackRef();
+        vm.prank(keeper);
+        feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
+
         vm.startPrank(admin);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, admin));
         feeCollector.setBuybackParams(1, 100);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector,
+                admin,
+                feeCollector.BUYBACK_EXECUTOR_APPROVER_ROLE()
+            )
+        );
+        feeCollector.setAuthorizedBuybackCaller(keeper, false);
         vm.stopPrank();
+    }
+
+    function test_buyback_requires_prior_block_spot() public {
+        _accrueBuybackPending();
+        assertEq(feeCollector.frozenSqrtPriceX96(), 0);
+        assertGt(uint256(feeCollector.pendingSqrtPriceX96()), 0);
+
+        vm.expectRevert(PhoenixBuyback.BuybackPriceNotWarmed.selector);
+        feeCollector.executeBuyback(1, 0, block.timestamp + 1);
+    }
+
+    function test_buyback_uses_frozen_previous_block_spot() public {
+        uint256 pendBb = _accrueBuybackPending();
+        uint160 pendingBefore = feeCollector.pendingSqrtPriceX96();
+        assertGt(uint256(pendingBefore), 0);
+        assertEq(feeCollector.frozenSqrtPriceX96(), 0);
+
+        _rollBuybackRef();
+        feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
+        assertEq(feeCollector.frozenSqrtPriceX96(), pendingBefore);
+        assertGt(feeCollector.recyclePxt(), 0);
+    }
+
+    /// @dev Same-block JIT / spot move cannot retarget min-out or sqrtLimit (JLVE).
+    function test_buyback_rejects_same_block_spot_manipulation() public {
+        uint256 pendBb = _accrueBuybackPending();
+        _rollBuybackRef();
+
+        vm.prank(admin);
+        musdc.mint(alice, 2_000_000 * WHOLE);
+        _buy(alice, 2_000_000 * WHOLE);
+
+        uint160 frozen = feeCollector.frozenSqrtPriceX96();
+        (uint160 live,,,) = manager.getSlot0(key.toId());
+        assertGt(uint256(frozen), 0);
+        assertTrue(live != frozen);
+
+        vm.expectRevert();
+        feeCollector.executeBuyback(pendBb / 2, 0, block.timestamp + 1);
+    }
+
+    function _rollBuybackRef() internal {
+        vm.roll(block.number + 1);
+    }
+
+    function _accrueBuybackPending() internal returns (uint256 pendBb) {
+        vm.prank(admin);
+        pxt.setWalletStatus(antiBot, Pxt.WalletStatus.FeeExempt);
+        vm.warp(sellUnlock);
+        _clearAntiBot();
+        _sell(antiBot, 1 * WHOLE);
+        _sell(alice, 1_000 * WHOLE);
+        feeCollector.collect();
+        (,,, pendBb) = feeCollector.pending(address(musdc));
+        assertGt(pendBb, 0);
     }
 
     function _clearAntiBot() internal {
