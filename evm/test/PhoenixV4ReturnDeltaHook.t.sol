@@ -17,6 +17,8 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
+import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
+import {TransientStateLibrary} from "@uniswap/v4-core/src/libraries/TransientStateLibrary.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 
@@ -70,6 +72,45 @@ contract PendingSellUnlockProbe is IUnlockCallback {
         } else {
             hook.finalizeOrphanedSell();
         }
+        return bytes("");
+    }
+}
+
+/// @dev MDSS: 6909-burn settle then matching ERC-20 deposit must not take the dump-tax rebate.
+contract MdssMatchingDepositProbe is IUnlockCallback {
+    using CurrencySettler for Currency;
+    using TransientStateLibrary for IPoolManager;
+
+    IPoolManager public immutable manager;
+    PhoenixV4ReturnDeltaHook public immutable hook;
+    Pxt public immutable pxt;
+
+    constructor(IPoolManager manager_, PhoenixV4ReturnDeltaHook hook_, Pxt pxt_) {
+        manager = manager_;
+        hook = hook_;
+        pxt = pxt_;
+    }
+
+    function attack(PoolKey calldata key, SwapParams calldata params, address claimHolder, address decoy) external {
+        manager.unlock(abi.encode(key, params, claimHolder, decoy));
+    }
+
+    function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
+        require(msg.sender == address(manager));
+        (PoolKey memory key, SwapParams memory params, address claimHolder, address decoy) =
+            abi.decode(rawData, (PoolKey, SwapParams, address, address));
+
+        manager.swap(key, params, bytes(""));
+
+        Currency pxtCur = Currency.wrap(address(pxt));
+        int256 pxtDebt = manager.currencyDelta(address(this), pxtCur);
+        require(pxtDebt < 0, "no pxt debt");
+        pxtCur.settle(manager, claimHolder, uint256(-pxtDebt), true);
+
+        uint256 pending = hook.pendingDexSellAmount();
+        require(pending != 0, "no pending");
+        IERC20(address(pxt)).transferFrom(decoy, address(manager), pending);
+
         return bytes("");
     }
 }
@@ -519,6 +560,52 @@ contract PhoenixV4ReturnDeltaHookTest is Test {
         assertEq(musdc.balanceOf(address(hook)), hookUsdcBefore);
         (,,, uint256 pendBbAfter) = feeCollector.pending(address(musdc));
         assertGt(pendBbAfter, pendBbBefore);
+    }
+
+    /// @dev Claim settle + matching ERC-20 deposit cannot impersonate the seller (MDSS).
+    function test_matching_deposit_after_6909_settle_reverts() public {
+        _openSells();
+
+        uint256 amountIn = 5_000 * WHOLE;
+        bool buyZfo = Currency.unwrap(key.currency0) == address(musdc);
+        vm.startPrank(alice);
+        musdc.approve(address(swapRouter), type(uint256).max);
+        swapRouter.swap(
+            key,
+            SwapParams({
+                zeroForOne: buyZfo,
+                amountSpecified: -amountIn.toInt256(),
+                sqrtPriceLimitX96: buyZfo ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: true, settleUsingBurn: false}),
+            abi.encode(alice)
+        );
+        vm.stopPrank();
+
+        uint256 claims = manager.balanceOf(alice, uint256(uint160(address(pxt))));
+        uint256 sellAmount = claims / 2;
+        assertGt(sellAmount, 0);
+
+        address decoy = makeAddr("decoy");
+        vm.startPrank(admin);
+        pxt.transfer(decoy, 100_000 * WHOLE);
+        vm.stopPrank();
+
+        MdssMatchingDepositProbe probe = new MdssMatchingDepositProbe(manager, hook, pxt);
+        vm.prank(alice);
+        manager.setOperator(address(probe), true);
+        vm.prank(decoy);
+        IERC20(address(pxt)).approve(address(probe), type(uint256).max);
+
+        bool sellZfo = Currency.unwrap(key.currency0) == address(pxt);
+        SwapParams memory params = SwapParams({
+            zeroForOne: sellZfo,
+            amountSpecified: -sellAmount.toInt256(),
+            sqrtPriceLimitX96: sellZfo ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        vm.expectRevert(PhoenixV4ReturnDeltaHook.SellAlreadySettled.selector);
+        probe.attack(key, params, alice, decoy);
     }
 
     /// @dev Second swap in the same unlock before ERC-20 settle must revert (PendingSellOpen).

@@ -51,6 +51,8 @@ import {FeeKind, PxtFeeEvents, PxtFeeModel, ZeroAddress} from "../core/PxtFeeMod
 // Same-tx safety
 // While an ERC-20 sell skim is pending in transient storage, further swaps are blocked and
 // `finalizeOrphanedSell` is refused during unlock so a multi-swap router cannot deny the rebate.
+// `attributeSell` also requires the swap locker to still owe at least the transferred PXT (MDSS):
+// a 6909 burn that already cleared that debt cannot be followed by a matching deposit rebate.
 contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttributor {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
@@ -87,6 +89,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     bytes32 private constant _T_SPECIFIED_TAKE = keccak256("phoenix.rd.specifiedTake");
     /// @dev 1 if pending USDC notional is exact-out net (gross-up in attributeSell).
     bytes32 private constant _T_FEE_ON_NET = keccak256("phoenix.rd.feeOnNet");
+    /// @dev Swap `sender` (locker) that still owes PXT until ERC-20 / 6909 settle (MDSS).
+    bytes32 private constant _T_DEBTOR = keccak256("phoenix.rd.pending.debtor");
 
     /// @notice Persistent skim awaiting attributeSell or finalizeOrphanedSell (ERC-6909).
     struct OrphanSkim {
@@ -113,6 +117,8 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
     error PendingSellMismatch();
     /// @dev Transient sell skim still awaiting attributeSell (or unlock still open after a claim sell).
     error PendingSellOpen();
+    /// @dev ERC-20 attributeSell after the locker's PXT swap debt was already paid (e.g. 6909 burn).
+    error SellAlreadySettled();
     error FeeCollectorNotSet();
     error LiquidityNotAllowed();
 
@@ -234,7 +240,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         _noteOfficialSpot();
         (bool isBuy, bool isSell) = _classifySwap(key, params);
 
-        if (isSell) return _afterSell(key, params, delta);
+        if (isSell) return _afterSell(sender, key, params, delta);
         if (isBuy) return _afterBuy(sender, key, params, delta);
         return (BaseHook.afterSwap.selector, 0);
     }
@@ -278,6 +284,14 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         // LP / non-swap settlements also hit PoolManager; ignore when no pending swap skim.
         if (pendingPxt == 0) return;
         if (pxtAmount != pendingPxt) revert PendingSellMismatch();
+
+        // Rebate only while this transfer still pays the swap debt. A 6909 burn zeros the
+        // locker's PXT delta first; a later matching deposit must not take the dump-tax refund.
+        address debtor = address(uint160(_tload(_T_DEBTOR)));
+        int256 pxtDebt = poolManager.currencyDelta(debtor, pxtCurrency);
+        if (debtor == address(0) || pxtDebt >= 0 || SignedMath.abs(pxtDebt) < pxtAmount) {
+            revert SellAlreadySettled();
+        }
 
         uint256 usdcOut = _tload(_T_USDC_OUT);
         uint256 skimmed = _tload(_T_USDC_SKIM);
@@ -434,7 +448,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         return (BaseHook.beforeSwap.selector, toBeforeSwapDelta(usdcFee.toInt128(), 0), 0);
     }
 
-    function _afterSell(PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
+    function _afterSell(address sender, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta)
         internal
         returns (bytes4, int128)
     {
@@ -462,7 +476,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             if (usdcFee > 0) {
                 poolManager.take(quote, address(this), usdcFee);
             }
-            _recordPendingSkim(pxtAmount, usdcOut, usdcFee, Currency.unwrap(quote), false);
+            _recordPendingSkim(sender, pxtAmount, usdcOut, usdcFee, Currency.unwrap(quote), false);
             hookDeltaUnspecified = usdcFee;
             emit HookFeeCharged(address(0), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, usdcFee + burnAmount);
             emit FeeCharged(
@@ -481,7 +495,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
             uint256 skimmed = _tload(_T_USDC_SKIM);
             uint256 usdcOut = _tload(_T_USDC_OUT);
             address quoteAddr = address(uint160(_tload(_T_QUOTE)));
-            _recordPendingSkim(poolPxt + burnAmount, usdcOut, skimmed, quoteAddr, true);
+            _recordPendingSkim(sender, poolPxt + burnAmount, usdcOut, skimmed, quoteAddr, true);
             hookDeltaUnspecified = burnAmount;
             emit HookFeeCharged(address(0), FeeKind.Penalty, PxtFeeModel.PENALTY_FEE_BPS, skimmed + burnAmount);
             emit FeeCharged(
@@ -644,14 +658,20 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         return specifiedIs0 == _pxtIsCurrency0(key);
     }
 
-    function _recordPendingSkim(uint256 pxtIn, uint256 usdcOut, uint256 usdcSkim, address quote, bool feeOnNet)
-        internal
-    {
+    function _recordPendingSkim(
+        address debtor,
+        uint256 pxtIn,
+        uint256 usdcOut,
+        uint256 usdcSkim,
+        address quote,
+        bool feeOnNet
+    ) internal {
         _tstore(_T_PXT_IN, pxtIn);
         _tstore(_T_USDC_OUT, usdcOut);
         _tstore(_T_USDC_SKIM, usdcSkim);
         _tstore(_T_QUOTE, uint256(uint160(quote)));
         _tstore(_T_FEE_ON_NET, feeOnNet ? 1 : 0);
+        _tstore(_T_DEBTOR, uint256(uint160(debtor)));
         orphanSkim = OrphanSkim({
             pxtIn: pxtIn.toUint128(),
             usdcOut: usdcOut.toUint128(),
@@ -668,6 +688,7 @@ contract PhoenixV4ReturnDeltaHook is BaseHook, Ownable, PxtFeeEvents, ISellAttri
         _tstore(_T_QUOTE, 0);
         _tstore(_T_FEE_ON_NET, 0);
         _tstore(_T_SPECIFIED_TAKE, 0);
+        _tstore(_T_DEBTOR, 0);
         orphanSkim = OrphanSkim({pxtIn: 0, usdcOut: 0, usdcSkim: 0, quote: address(0), feeOnNet: false});
     }
 
