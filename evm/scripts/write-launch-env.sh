@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# Parse `make launch` forge logs and merge deployed addresses into the live env file.
-# Usage: write-arbitrum-env.sh <forge-log> <evm-env-file>
+# Parse `make launch` forge logs and merge deployed addresses into evm/.env.$(CLUSTER).
+# Usage: write-launch-env.sh <forge-log> <evm-env-file>
 set -euo pipefail
 
-LOG="${1:?usage: write-arbitrum-env.sh <forge-log> <evm-env-file>}"
+LOG="${1:?usage: write-launch-env.sh <forge-log> <evm-env-file>}"
 EVM_OUT="${2:?missing evm env path}"
 
-POOL_MANAGER_DEFAULT="0x360e68faccca8ca495c1b759fd9eee466db9fb32"
-POSITION_MANAGER_DEFAULT="0xd88f38f930b7952f2db2432cb002e7abbf3dd869"
-UNIVERSAL_ROUTER_DEFAULT="0xa51afafe0263b40edaef0df8781ea9aa03e381a3"
-STATE_VIEW_DEFAULT="0x76fd297e2d437cd7f76d50f01afe6160f86e9990"
-QUOTER_DEFAULT="0x3972c00f7ed4885e145823eb7c655375d275a1c5"
 PERMIT2="0x000000000022D473030F116dDEE9F6B43aC78BA3"
-USDC_DEFAULT="0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 
 # Preserve secrets / RPC / launch config from existing env if present.
 PRIVATE_KEY=""
-ARBITRUM_RPC_URL="https://arb1.arbitrum.io/rpc"
-BASE_RPC_URL=""
 RPC_URL=""
+ANVIL_RPC_URL=""
+ARBITRUM_RPC_URL=""
+BASE_RPC_URL=""
 ARBISCAN_API_KEY=""
-FORK_CHAIN_ID="42161"
+BASESCAN_API_KEY=""
+ETHERSCAN_API_KEY=""
+FORK_CHAIN_ID=""
 LAUNCH_SALT=""
 LAUNCH_OWNER=""
 RECIPIENT_APPROVER=""
@@ -29,13 +26,14 @@ FEE_EXEMPT_WALLETS=""
 NO_PENALTY_WALLETS=""
 LP_SEED_USDC_WHOLE="20"
 LP_SEED_PXT_WHOLE="20000"
-POSITION_MANAGER="$POSITION_MANAGER_DEFAULT"
-UNIVERSAL_ROUTER="$UNIVERSAL_ROUTER_DEFAULT"
-STATE_VIEW="$STATE_VIEW_DEFAULT"
-QUOTER="$QUOTER_DEFAULT"
+POOL_MANAGER=""
+POSITION_MANAGER=""
+UNIVERSAL_ROUTER=""
+STATE_VIEW=""
+QUOTER=""
 BUYBACK_RECYCLE_WIDTH_SPACINGS="10"
 BUYBACK_MAX_SLIPPAGE_BPS="200"
-EVM_CLUSTER="arbitrum"
+EVM_CLUSTER=""
 if [[ -f "$EVM_OUT" ]]; then
   # shellcheck disable=SC1090
   set -a && . "$EVM_OUT" && set +a || true
@@ -56,6 +54,7 @@ pick() {
 
 PXT="$(pick PXT)"
 USDC="$(pick USDC)"
+if [[ -z "$USDC" ]]; then USDC="$(pick mUSDC)"; fi
 HOOK="$(pick PhoenixV4ReturnDeltaHook)"
 COLLECTOR="$(pick PhoenixFeeCollector)"
 DONATION="$(pick 'Donation wallet')"
@@ -68,6 +67,7 @@ ANTI_BOT_OPERATOR="$(pick 'Anti-bot operator (funds open)')"
 SELL_UNLOCK="$(pick 'Sell unlock timestamp')"
 OPEN_SELL="$(pick PhoenixAntiBotOpenSell)"
 SWAP_TEST="$(pick PoolSwapTest)"
+SWAP_TEST="${SWAP_TEST:-${POOL_SWAP_TEST:-}}"
 PM_FROM_LOG="$(pick PoolManager)"
 LAUNCHER="$(pick PhoenixLauncher)"
 ORCH="$(pick PhoenixOrchestrator)"
@@ -79,26 +79,31 @@ OPEN_SELL_DEPLOYER="$(pick PhoenixOpenSellDeployer)"
 REQUIRED=(PXT USDC HOOK DONATION MARKETING ADMIN CURRENCY0 CURRENCY1 COLLECTOR OPEN_SELL SWAP_TEST LAUNCHER ORCH)
 for v in "${REQUIRED[@]}"; do
   if [[ -z "${!v}" ]]; then
-    echo "write-arbitrum-env: missing ${v} in forge log" >&2
+    echo "write-launch-env: missing ${v} in forge log" >&2
     exit 1
   fi
 done
 
-POOL_MANAGER="${PM_FROM_LOG:-${POOL_MANAGER:-$POOL_MANAGER_DEFAULT}}"
-POSITION_MANAGER="${POSITION_MANAGER:-$POSITION_MANAGER_DEFAULT}"
-UNIVERSAL_ROUTER="${UNIVERSAL_ROUTER:-$UNIVERSAL_ROUTER_DEFAULT}"
-STATE_VIEW="${STATE_VIEW:-$STATE_VIEW_DEFAULT}"
-QUOTER="${QUOTER:-$QUOTER_DEFAULT}"
+POOL_MANAGER="${PM_FROM_LOG:-${POOL_MANAGER:-}}"
+RPC_URL="${RPC_URL:-${ANVIL_RPC_URL:-${ARBITRUM_RPC_URL:-${BASE_RPC_URL:-}}}}"
+CLUSTER_NAME="${EVM_CLUSTER:-}"
+if [[ -z "$CLUSTER_NAME" ]]; then
+  CLUSTER_NAME="$(basename "$EVM_OUT")"
+  CLUSTER_NAME="${CLUSTER_NAME#.env.}"
+fi
 
 cat >"$EVM_OUT" <<EOF
 # Auto-updated by make launch — DO NOT COMMIT
-EVM_CLUSTER=${EVM_CLUSTER:-arbitrum}
+EVM_CLUSTER=${CLUSTER_NAME}
 HOOK_MODE=return-delta
-ARBITRUM_RPC_URL=${ARBITRUM_RPC_URL}
+RPC_URL=${RPC_URL}
+${ANVIL_RPC_URL:+ANVIL_RPC_URL=${ANVIL_RPC_URL}}
+${ARBITRUM_RPC_URL:+ARBITRUM_RPC_URL=${ARBITRUM_RPC_URL}}
 ${BASE_RPC_URL:+BASE_RPC_URL=${BASE_RPC_URL}}
-${RPC_URL:+RPC_URL=${RPC_URL}}
 FORK_CHAIN_ID=${FORK_CHAIN_ID}
-ARBISCAN_API_KEY=${ARBISCAN_API_KEY}
+${ARBISCAN_API_KEY:+ARBISCAN_API_KEY=${ARBISCAN_API_KEY}}
+${BASESCAN_API_KEY:+BASESCAN_API_KEY=${BASESCAN_API_KEY}}
+${ETHERSCAN_API_KEY:+ETHERSCAN_API_KEY=${ETHERSCAN_API_KEY}}
 
 PRIVATE_KEY=${PRIVATE_KEY}
 ADMIN_ADDRESS=${ADMIN}
@@ -112,7 +117,7 @@ ${FEE_EXEMPT_WALLETS:+FEE_EXEMPT_WALLETS=${FEE_EXEMPT_WALLETS}}
 ${NO_PENALTY_WALLETS:+NO_PENALTY_WALLETS=${NO_PENALTY_WALLETS}}
 
 PXT_ADDRESS=${PXT}
-QUOTE_TOKEN_ADDRESS=${USDC:-$USDC_DEFAULT}
+QUOTE_TOKEN_ADDRESS=${USDC}
 PHOENIX_HOOK=${HOOK}
 FEE_COLLECTOR=${COLLECTOR}
 PHOENIX_LAUNCHER=${LAUNCHER}
@@ -138,7 +143,7 @@ OPEN_SELL_OPERATOR=${ANTI_BOT_OPERATOR:-$ADMIN}
 ANTI_BOT_OPEN_SELL=${OPEN_SELL}
 SELL_UNLOCK_TIMESTAMP=${SELL_UNLOCK}
 
-USE_MOCK_USDC=false
+USE_MOCK_USDC=${USE_MOCK_USDC:-false}
 QUOTE_DECIMALS=6
 LP_SEED_USDC_WHOLE=${LP_SEED_USDC_WHOLE}
 LP_SEED_PXT_WHOLE=${LP_SEED_PXT_WHOLE}

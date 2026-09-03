@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
-# Verify Arbitrum One deployments on Arbiscan (Etherscan V2 API).
-# Usage: verify-arbitrum.sh [evm/.env.arbitrum]
-# Requires: ARBISCAN_API_KEY or ETHERSCAN_API_KEY in the env file / environment.
+# Verify a live launch on the chain's Etherscan V2 explorer.
+# Usage: verify-live.sh <evm/.env.CLUSTER>
+# Requires FORK_CHAIN_ID and an Etherscan V2 API key (ETHERSCAN_API_KEY,
+# ARBISCAN_API_KEY, or BASESCAN_API_KEY).
 #
 # Launcher path: Pxt / hook / FeeCollector constructors take the orchestrator as admin,
-# not the EOA. Mine hook with operator = OPEN_SELL_OPERATOR (ANTI_BOT_SELLER env at wire).
+# not the EOA. Mine hook with operator = OPEN_SELL_OPERATOR.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="${1:-$ROOT/.env.arbitrum}"
+ENV_FILE="${1:?usage: verify-live.sh <evm/.env.CLUSTER>}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Missing $ENV_FILE — run make launch first" >&2
+  echo "Missing $ENV_FILE — run make launch CLUSTER=... first" >&2
   exit 1
 fi
 
 # shellcheck disable=SC1090
 set -a && . "$ENV_FILE" && set +a
 
-API_KEY="${ARBISCAN_API_KEY:-${ETHERSCAN_API_KEY:-}}"
+API_KEY="${ETHERSCAN_API_KEY:-${ARBISCAN_API_KEY:-${BASESCAN_API_KEY:-}}}"
 if [[ -z "$API_KEY" ]]; then
-  echo "Set ARBISCAN_API_KEY (or ETHERSCAN_API_KEY) in $ENV_FILE" >&2
-  echo "Get a key at https://etherscan.io/apidashboard (V2 works for Arbitrum)" >&2
+  echo "Set ETHERSCAN_API_KEY (or ARBISCAN_API_KEY / BASESCAN_API_KEY) in $ENV_FILE" >&2
+  echo "Get a V2 key at https://etherscan.io/apidashboard" >&2
   exit 1
 fi
 
+: "${FORK_CHAIN_ID:?set FORK_CHAIN_ID in $ENV_FILE}"
 : "${PXT_ADDRESS:?}"
 : "${PHOENIX_HOOK:?}"
 : "${FEE_COLLECTOR:?}"
@@ -40,8 +42,15 @@ fi
 HOOK_CTOR_THIRD="${OPEN_SELL_OPERATOR:-${ANTI_BOT_OPERATOR:-$ADMIN_ADDRESS}}"
 OPEN_SELL_OPERATOR="${OPEN_SELL_OPERATOR:-$ADMIN_ADDRESS}"
 ORCH="$PHOENIX_ORCHESTRATOR"
+CHAIN="$FORK_CHAIN_ID"
 
-CHAIN=42161
+case "$CHAIN" in
+  42161) EXPLORER="https://arbiscan.io" ;;
+  8453) EXPLORER="https://basescan.org" ;;
+  84532) EXPLORER="https://sepolia.basescan.org" ;;
+  *) EXPLORER="https://etherscan.io" ;;
+esac
+
 VERIFY_COMMON=(--chain "$CHAIN" --etherscan-api-key "$API_KEY" --watch --compiler-version "0.8.26")
 
 cd "$ROOT"
@@ -55,7 +64,7 @@ verify_one() {
   if forge verify-contract "$addr" "$contract" "${VERIFY_COMMON[@]}" "$@"; then
     echo "OK: $contract"
   else
-    echo "FAILED: $contract (may already be verified — check Arbiscan)" >&2
+    echo "FAILED: $contract (may already be verified — check $EXPLORER)" >&2
     return 1
   fi
 }
@@ -107,10 +116,10 @@ if [[ "$FAIL" -ne 0 ]]; then
   exit 1
 fi
 echo "All contracts submitted for verification."
-echo "PXT:        https://arbiscan.io/address/${PXT_ADDRESS}#code"
-echo "Hook:       https://arbiscan.io/address/${PHOENIX_HOOK}#code"
-echo "Collector:  https://arbiscan.io/address/${FEE_COLLECTOR}#code"
-echo "SwapTest:   https://arbiscan.io/address/${POOL_SWAP_TEST}#code"
-echo "OpenSell:   https://arbiscan.io/address/${ANTI_BOT_OPEN_SELL}#code"
-echo "Launcher:   https://arbiscan.io/address/${PHOENIX_LAUNCHER:-}#code"
-echo "Orch:       https://arbiscan.io/address/${ORCH}#code"
+echo "PXT:        ${EXPLORER}/address/${PXT_ADDRESS}#code"
+echo "Hook:       ${EXPLORER}/address/${PHOENIX_HOOK}#code"
+echo "Collector:  ${EXPLORER}/address/${FEE_COLLECTOR}#code"
+echo "SwapTest:   ${EXPLORER}/address/${POOL_SWAP_TEST}#code"
+echo "OpenSell:   ${EXPLORER}/address/${ANTI_BOT_OPEN_SELL}#code"
+echo "Launcher:   ${EXPLORER}/address/${PHOENIX_LAUNCHER:-}#code"
+echo "Orch:       ${EXPLORER}/address/${ORCH}#code"

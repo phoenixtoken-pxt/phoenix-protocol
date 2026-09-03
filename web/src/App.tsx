@@ -4,6 +4,8 @@ import { PriceChart } from "./components/PriceChart";
 import { ERC20_ABI, FEE_COLLECTOR_ABI, HOOK_ABI, ANTI_BOT_OPEN_SELL_ABI, PXT_ABI, assertConfig, config, explorerTxUrl } from "./contracts";
 import { useSpotPrice } from "./hooks/useSpotPrice";
 import {
+  ANVIL_DEFAULT_TRADER_INDEX,
+  ANVIL_OPS_COUNT,
   ANVIL_WALLETS,
   connectAnvilWallet,
   type AnvilWalletIndex,
@@ -144,6 +146,9 @@ function decodeErr(e: unknown): string {
     if (blob.includes("d64e375e") || /poolnotconfigured/i.test(blob)) {
       return "FeeCollector pool not configured";
     }
+    if (blob.includes("51603099") || /unauthorizedbuybackcaller/i.test(blob)) {
+      return "Connect the Buyback wallet to execute buyback";
+    }
     if (blob.includes("e450d38c") || /erc20insufficientbalance/i.test(blob)) {
       return "Insufficient PXT balance for this transfer (check the connected wallet)";
     }
@@ -176,12 +181,13 @@ export function App() {
   const [account, setAccount] = useState("");
   const [label, setLabel] = useState("");
   const [signer, setSigner] = useState<Signer | null>(null);
-  const [walletIndex, setWalletIndex] = useState<AnvilWalletIndex>(4);
+  const [walletIndex, setWalletIndex] = useState<AnvilWalletIndex>(ANVIL_DEFAULT_TRADER_INDEX);
 
   const [balances, setBalances] = useState<Balances>(EMPTY_BAL);
   const [fees, setFees] = useState<FeeBals>(EMPTY_FEE);
   const [pending, setPending] = useState<PendingFees>(EMPTY_PENDING);
   const [buybackQuote, setBuybackQuote] = useState<BuybackQuote>(EMPTY_BUYBACK);
+  const [authorizedBuyback, setAuthorizedBuyback] = useState(false);
   const [lpFees, setLpFees] = useState<LpFeeSnapshot | null>(null);
   const [hook, setHook] = useState<HookInfo | null>(null);
   const [walletStatus, setWalletStatus] = useState<number | null>(null);
@@ -195,7 +201,7 @@ export function App() {
   const [quote, setQuote] = useState<SwapQuote | null>(null);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
-  const [p2pTo, setP2pTo] = useState<string>(ANVIL_WALLETS[5].address);
+  const [p2pTo, setP2pTo] = useState<string>(ANVIL_WALLETS[6].address);
   const [p2pAmount, setP2pAmount] = useState("100");
   const [buybackUsdcInput, setBuybackUsdcInput] = useState("");
 
@@ -296,9 +302,19 @@ export function App() {
         recycleTickUpper: Number(recycleTickUpper),
         recycleLiquidity,
       });
+      if (who) {
+        try {
+          setAuthorizedBuyback(Boolean(await collector.isAuthorizedBuybackCaller(who)));
+        } catch {
+          setAuthorizedBuyback(false);
+        }
+      } else {
+        setAuthorizedBuyback(false);
+      }
     } else {
       setPending(EMPTY_PENDING);
       setBuybackQuote(EMPTY_BUYBACK);
+      setAuthorizedBuyback(false);
     }
 
     try {
@@ -727,6 +743,7 @@ export function App() {
     buybackQuote.usdcSpendable > 0n ? buybackQuote.usdcSpendable : pending.buybackUsdc;
   const canBuyback =
     hasFeeCollector &&
+    authorizedBuyback &&
     (pending.buybackPxt > 0n || pending.buybackUsdc > 0n || buybackUsdcMax > 0n);
 
   function setBuybackPct(pct: number) {
@@ -769,7 +786,7 @@ export function App() {
       <section className="panel" style={{ marginBottom: 16 }}>
         <h2>Anvil wallets</h2>
         <div className="wallet-grid">
-          {ANVIL_WALLETS.slice(0, 4).map((w, i) => (
+          {ANVIL_WALLETS.slice(0, ANVIL_OPS_COUNT).map((w, i) => (
             <button
               key={w.address}
               type="button"
@@ -784,8 +801,8 @@ export function App() {
           ))}
         </div>
         <div className="wallet-grid" style={{ marginTop: 8 }}>
-          {ANVIL_WALLETS.slice(4).map((w, i) => {
-            const index = (i + 4) as AnvilWalletIndex;
+          {ANVIL_WALLETS.slice(ANVIL_OPS_COUNT).map((w, i) => {
+            const index = (i + ANVIL_OPS_COUNT) as AnvilWalletIndex;
             return (
               <button
                 key={w.address}
@@ -1204,7 +1221,9 @@ export function App() {
                   !hasFeeCollector
                     ? "FeeCollector required"
                     : !canBuyback
-                      ? "No pending buyback budget"
+                      ? authorizedBuyback
+                        ? "No pending buyback budget"
+                        : "Connect the Buyback wallet"
                       : buybackUsdcInput.trim()
                         ? `Spend ${buybackUsdcInput.trim()} mUSDC`
                         : `Spend full available ~${formatBal(buybackUsdcMax)} mUSDC`
@@ -1214,7 +1233,7 @@ export function App() {
               </button>
             </div>
             <p className="hint" style={{ marginTop: 10 }}>
-              After a claims (ERC-6909) sell, USDC skim sits on the hook until Refresh (finalizeOrphanedSell). Then Collect pays donation / marketing; set buyback mUSDC (or %); leave empty for full cash budget. Protocol buyback skips the 2.7% buy skim.
+              After a claims (ERC-6909) sell, USDC skim sits on the hook until Refresh (finalizeOrphanedSell). Then Collect pays donation / marketing. Connect the Buyback wallet (Anvil #11) to execute; set mUSDC (or %) or leave empty for the full cash budget. Protocol buyback skips the 2.7% buy skim.
             </p>
           </section>
 

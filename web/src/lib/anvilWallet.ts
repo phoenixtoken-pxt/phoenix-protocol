@@ -1,13 +1,19 @@
 import { Wallet, getAddress, type Signer } from "ethers";
 import { readProvider } from "./providers";
 
-/** Default Anvil mnemonic accounts — local testing only. #4 (Shares) omitted from the UI picker. */
+/** Default Anvil mnemonic accounts — local testing only. #4 (Shares / RECIPIENT_APPROVER) omitted from the UI picker. */
 export const ANVIL_WALLETS = [
   {
     label: "Admin",
     address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     privateKey: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
     note: "FeeExempt · anti-bot first seller",
+  },
+  {
+    label: "Buyback",
+    address: "0x71bE63f3384f5fb98995898A86B02Fb2426c5788",
+    privateKey: "0x701b615bbdfb9de65240bc28bd21bbc0d996645a3dd57e7b12bc2bdf6f192c82",
+    note: "executeBuyback keeper (Anvil #11)",
   },
   {
     label: "Donations",
@@ -59,7 +65,12 @@ export const ANVIL_WALLETS = [
   },
 ] as const;
 
-export type AnvilWalletIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+/** Admin, Buyback, Donations, Marketing, NoPenalty — first wallet-grid row. */
+export const ANVIL_OPS_COUNT = 5;
+/** Tester #5 — default dump-tier trader (not the buyback keeper). */
+export const ANVIL_DEFAULT_TRADER_INDEX = 5 as const;
+
+export type AnvilWalletIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
 /** Clear forked EIP-7702 bytecode so transfers treat the account as a plain EOA. */
 export async function resetEoaIfNeeded(address: string): Promise<void> {

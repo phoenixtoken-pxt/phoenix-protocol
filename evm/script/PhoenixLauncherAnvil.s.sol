@@ -43,11 +43,12 @@ contract LaunchPhoenix is Script {
         uint256 usdcSeed = vm.envOr("LP_SEED_USDC_WHOLE", DEFAULT_USDC_SEED_WHOLE) * unit;
         bytes32 salt = vm.envOr("LAUNCH_SALT", bytes32(uint256(1)));
 
-        address pm = vm.envOr("POOL_MANAGER", V4Addresses.BASE_SEPOLIA_POOL_MANAGER);
-        address swapTest = vm.envOr("POOL_SWAP_TEST", V4Addresses.BASE_SEPOLIA_POOL_SWAP_TEST);
-        address lpRouter = vm.envOr("POOL_MODIFY_LIQUIDITY_TEST", V4Addresses.BASE_SEPOLIA_POOL_MODIFY_LIQUIDITY_TEST);
-        address posm = vm.envOr("POSITION_MANAGER", V4Addresses.BASE_SEPOLIA_POSITION_MANAGER);
-        address operator = vm.envOr("ANTI_BOT_SELLER", client);
+        address pm = _envOrAddr("POOL_MANAGER", V4Addresses.BASE_SEPOLIA_POOL_MANAGER);
+        address swapTest = _envOrAddr("POOL_SWAP_TEST", V4Addresses.BASE_SEPOLIA_POOL_SWAP_TEST);
+        address lpRouter = _envOrAddr("POOL_MODIFY_LIQUIDITY_TEST", V4Addresses.BASE_SEPOLIA_POOL_MODIFY_LIQUIDITY_TEST);
+        address posm = _envOrAddr("POSITION_MANAGER", V4Addresses.BASE_SEPOLIA_POSITION_MANAGER);
+        address operator = _envAddr("ANTI_BOT_SELLER");
+        if (operator == address(0)) operator = client;
 
         vm.deal(client, 10 ether);
 
@@ -85,7 +86,7 @@ contract LaunchPhoenix is Script {
         p.swapRouter = swapTest;
         p.lpRouter = lpRouter;
         p.positionManager = posm;
-        p.universalRouter = vm.envOr("UNIVERSAL_ROUTER", V4Addresses.BASE_SEPOLIA_UNIVERSAL_ROUTER);
+        p.universalRouter = _envOrAddr("UNIVERSAL_ROUTER", V4Addresses.BASE_SEPOLIA_UNIVERSAL_ROUTER);
         p.sellUnlockTimestamp = sellUnlock;
         p.pxtSeed = pxtSeed;
         p.usdcSeed = usdcSeed;
@@ -122,11 +123,13 @@ contract LaunchPhoenix is Script {
         console2.log("PhoenixLauncher:", address(launcher));
         console2.log("PhoenixOrchestrator:", address(orch));
         console2.log("PXT:", address(token));
+        console2.log("USDC:", address(musdc));
         console2.log("mUSDC:", address(musdc));
         console2.log("PhoenixV4ReturnDeltaHook:", address(orch.hook()));
         console2.log("PhoenixFeeCollector:", address(orch.collector()));
         console2.log("PhoenixAntiBotOpenSell:", address(orch.openSell()));
         console2.log("PoolManager:", address(token.poolManager()));
+        console2.log("PoolSwapTest:", address(orch.openSell().swapRouter()));
         console2.log("Donation wallet:", token.DONATION_WALLET());
         console2.log("Marketing wallet:", token.MARKETING_WALLET());
         console2.log("Anti-bot seller (openSell helper):", token.antiBotSeller());
@@ -147,20 +150,28 @@ contract LaunchPhoenix is Script {
     }
 
     function _launchOwner(uint256 deployerKey) private view returns (address client) {
-        if (vm.envExists("LAUNCH_OWNER")) {
-            client = vm.envAddress("LAUNCH_OWNER");
-            if (client == address(0)) revert("LAUNCH_OWNER is zero");
-            return client;
-        }
+        client = _envAddr("LAUNCH_OWNER");
+        if (client != address(0)) return client;
         return vm.addr(deployerKey);
     }
 
     function _quote(uint8 quoteDecimals, address owner) private returns (MockERC20 musdc) {
-        if (vm.envExists("QUOTE_TOKEN_ADDRESS")) {
-            address existing = vm.envAddress("QUOTE_TOKEN_ADDRESS");
-            if (existing != address(0)) return MockERC20(existing);
-        }
+        address existing = _envAddr("QUOTE_TOKEN_ADDRESS");
+        if (existing != address(0) && existing.code.length > 0) return MockERC20(existing);
         return new MockERC20("Mock USDC", "mUSDC", quoteDecimals, owner);
+    }
+
+    function _envAddr(string memory envKey) private view returns (address) {
+        try vm.envAddress(envKey) returns (address configured) {
+            return configured;
+        } catch {
+            return address(0);
+        }
+    }
+
+    function _envOrAddr(string memory envKey, address orAddr) private view returns (address) {
+        address configured = _envAddr(envKey);
+        return configured == address(0) ? orAddr : configured;
     }
 
     function _currencies(Pxt token, address quote) internal pure returns (address c0, address c1) {
@@ -176,8 +187,11 @@ contract LaunchPhoenix is Script {
     }
 
     function _addrList(string memory envKey) internal view returns (address[] memory wallets) {
-        if (!vm.envExists(envKey)) return new address[](0);
-        return vm.envAddress(envKey, ",");
+        try vm.envAddress(envKey, ",") returns (address[] memory configured) {
+            return configured;
+        } catch {
+            return new address[](0);
+        }
     }
 }
 

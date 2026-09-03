@@ -58,12 +58,12 @@ contract LaunchProtocol is Script {
         if (block.timestamp >= sellUnlock) revert("SELL_UNLOCK_TIMESTAMP is in the past");
 
         ChainV4 memory chain = _chainV4();
-        address pm = vm.envOr("POOL_MANAGER", chain.poolManager);
-        address quote = vm.envOr("QUOTE_TOKEN_ADDRESS", chain.quote);
-        address posm = vm.envOr("POSITION_MANAGER", chain.positionManager);
-        address ur = vm.envOr("UNIVERSAL_ROUTER", chain.universalRouter);
-        address lpRouter = vm.envOr("POOL_MODIFY_LIQUIDITY_TEST", chain.lpRouter);
-        address swapTest = vm.envOr("POOL_SWAP_TEST", chain.swapTest);
+        address pm = _envOrAddr("POOL_MANAGER", chain.poolManager);
+        address quote = _envOrAddr("QUOTE_TOKEN_ADDRESS", chain.quote);
+        address posm = _envOrAddr("POSITION_MANAGER", chain.positionManager);
+        address ur = _envOrAddr("UNIVERSAL_ROUTER", chain.universalRouter);
+        address lpRouter = _envOrAddr("POOL_MODIFY_LIQUIDITY_TEST", chain.lpRouter);
+        address swapTest = _envOrAddr("POOL_SWAP_TEST", chain.swapTest);
         require(pm != address(0), "POOL_MANAGER required");
         require(quote != address(0), "QUOTE_TOKEN_ADDRESS required");
 
@@ -228,11 +228,8 @@ contract LaunchProtocol is Script {
     }
 
     function _launchOwner(uint256 deployerKey) private view returns (address client) {
-        if (vm.envExists("LAUNCH_OWNER")) {
-            client = vm.envAddress("LAUNCH_OWNER");
-            if (client == address(0)) revert("LAUNCH_OWNER is zero");
-            return client;
-        }
+        client = _envAddr("LAUNCH_OWNER");
+        if (client != address(0)) return client;
         return vm.addr(deployerKey);
     }
 
@@ -249,8 +246,16 @@ contract LaunchProtocol is Script {
     }
 
     function _envAddr(string memory envKey) private view returns (address) {
-        if (!vm.envExists(envKey)) return address(0);
-        return vm.envAddress(envKey);
+        try vm.envAddress(envKey) returns (address configured) {
+            return configured;
+        } catch {
+            return address(0);
+        }
+    }
+
+    function _envOrAddr(string memory envKey, address orAddr) private view returns (address) {
+        address configured = _envAddr(envKey);
+        return configured == address(0) ? orAddr : configured;
     }
 
     function _currencies(address token, address quote) internal pure returns (address c0, address c1) {
@@ -259,8 +264,11 @@ contract LaunchProtocol is Script {
     }
 
     function _addrList(string memory envKey) internal view returns (address[] memory wallets) {
-        if (!vm.envExists(envKey)) return new address[](0);
-        return vm.envAddress(envKey, ",");
+        try vm.envAddress(envKey, ",") returns (address[] memory configured) {
+            return configured;
+        } catch {
+            return new address[](0);
+        }
     }
 }
 

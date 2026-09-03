@@ -12,7 +12,7 @@
 #                              min: top up only when balance < FUND_ETH_AMOUNT
 #                              set: always set balance to FUND_ETH_AMOUNT
 #   FUND_ETH_ALL               when true, fund mnemonic accounts #0..ANVIL_ACCOUNTS-1
-#   ANVIL_ACCOUNTS             default 10
+#   ANVIL_ACCOUNTS             default 12
 #   ANVIL_MNEMONIC             default Anvil junk mnemonic
 #   FUND_ETH_INCLUDE_PROTOCOL  default true - add admin + fee wallets from evm/.env.anvil
 #   FUND_ETH_INCLUDE_TESTERS   default true - add TESTER_RECIPIENTS / RECIPIENTS
@@ -25,7 +25,7 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RPC_URL="${ANVIL_RPC_URL:-http://127.0.0.1:8545}"
 AMOUNT="${FUND_ETH_AMOUNT:-${TESTER_ETH_AMOUNT:-10ether}}"
 MODE="${FUND_ETH_MODE:-min}"
-ACCOUNTS="${ANVIL_ACCOUNTS:-10}"
+ACCOUNTS="${ANVIL_ACCOUNTS:-12}"
 MNEMONIC="${ANVIL_MNEMONIC:-test test test test test test test test test test test junk}"
 INCLUDE_PROTOCOL="${FUND_ETH_INCLUDE_PROTOCOL:-true}"
 INCLUDE_TESTERS="${FUND_ETH_INCLUDE_TESTERS:-true}"
