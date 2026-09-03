@@ -33,7 +33,8 @@ ANVIL_ACCOUNTS ?= 11
         status-anvil collect-fees-anvil execute-buyback-anvil demo-buyback-anvil \
         mint-musdc-anvil distribute-pxt-anvil fund-testers-anvil \
         fund-eth-anvil fund-all-eth-anvil \
-        bootstrap-arbitrum open-trading-arbitrum check-arbitrum-funds verify-arbitrum \
+        launch seed lock launch-arbitrum seed-arbitrum lock-arbitrum \
+        open-trading-arbitrum check-arbitrum-funds verify-arbitrum \
         web-deps web-dev web-env \
         explorer explorer-stop
 
@@ -55,9 +56,11 @@ help:
 	@echo "  make demo-buyback-anvil                   Full local buyback dry-run"
 	@echo "  make fund-testers-anvil / distribute-pxt-anvil / web-dev"
 	@echo ""
-	@echo "Arbitrum One test deploy (no lock):"
+	@echo "Live deploy (LIVE_CLUSTER=arbitrum by default; launch → seed → lock):"
 	@echo "  make check-arbitrum-funds                 ETH + USDC balances for admin"
-	@echo "  make bootstrap-arbitrum                   Deploy unlocked stack + \$20 LP @ 0.001"
+	@echo "  make launch                               TX1 wire (no LP). Alias: launch-arbitrum"
+	@echo "  make seed                                 TX2 seed LP. Alias: seed-arbitrum"
+	@echo "  make lock                                 TX3 lock/renounce. Alias: lock-arbitrum"
 	@echo "  make verify-arbitrum                      Verify contracts on Arbiscan"
 	@echo "  make open-trading-arbitrum                After sell unlock: clear anti-bot + sell"
 	@echo "  See docs/DEPLOY_ARBITRUM.md"
@@ -111,9 +114,11 @@ anvil-base-sepolia-fork:
 	anvil --fork-url $$url --chain-id 84532 --port 8545 --block-time 1 --accounts $(ANVIL_ACCOUNTS)
 
 BOOTSTRAP_LOG := /tmp/pxt-bootstrap-fork.log
-ARBITRUM_BOOTSTRAP_LOG := /tmp/pxt-bootstrap-arbitrum.log
+LAUNCH_LOG := /tmp/pxt-launch.log
+LIVE_CLUSTER ?= arbitrum
+LIVE_ENV := $(EVM_DIR)/.env.$(LIVE_CLUSTER)
 
-# --- Arbitrum One (test, unlocked) ---
+# --- Live launch / seed / lock (chain-agnostic scripts; default cluster: arbitrum) ---
 check-arbitrum-funds:
 	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
 	@set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
@@ -122,26 +127,62 @@ check-arbitrum-funds:
 	echo -n "USDC: " && cast call $$QUOTE_TOKEN_ADDRESS "balanceOf(address)(uint256)" $$ADMIN_ADDRESS --rpc-url $$ARBITRUM_RPC_URL && \
 	echo "(need >= 20000000 raw USDC = 20 USDC; ~0.01 ETH for gas)"
 
-bootstrap-arbitrum: evm-build
-	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum — see docs/DEPLOY_ARBITRUM.md" && exit 1)
+launch: evm-build
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — see docs/DEPLOY_ARBITRUM.md" && exit 1)
 	@chmod +x $(EVM_DIR)/scripts/write-arbitrum-env.sh
 	@bash -eo pipefail -c '\
-	set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
-	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing in .env.arbitrum" && exit 1); \
-	test -n "$$ARBITRUM_RPC_URL" || (echo "ARBITRUM_RPC_URL missing" && exit 1); \
+	set -a && . $(LIVE_ENV) && set +a && \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing in $(LIVE_ENV)" && exit 1); \
+	RPC="$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-$${RPC_URL:-}}}"; \
+	test -n "$$RPC" || (echo "RPC URL missing (ARBITRUM_RPC_URL / BASE_RPC_URL / RPC_URL)" && exit 1); \
 	VERIFY_FLAGS=""; \
-	API_KEY="$${ARBISCAN_API_KEY:-$${ETHERSCAN_API_KEY:-}}"; \
-	if [ -n "$$API_KEY" ]; then \
-	  VERIFY_FLAGS="--verify --etherscan-api-key $$API_KEY --verifier-url https://api.etherscan.io/v2/api?chainid=42161"; \
-	  echo "Arbiscan verification enabled during broadcast"; \
+	API_KEY="$${ARBISCAN_API_KEY:-$${ETHERSCAN_API_KEY:-$${BASESCAN_API_KEY:-}}}"; \
+	CHAIN="$${FORK_CHAIN_ID:-}"; \
+	if [ -n "$$API_KEY" ] && [ -n "$$CHAIN" ]; then \
+	  VERIFY_FLAGS="--verify --etherscan-api-key $$API_KEY --verifier-url https://api.etherscan.io/v2/api?chainid=$$CHAIN"; \
+	  echo "Explorer verification enabled during broadcast (chain $$CHAIN)"; \
 	else \
-	  echo "WARN: ARBISCAN_API_KEY unset — deploy without verify; run make verify-arbitrum later"; \
+	  echo "WARN: API key or FORK_CHAIN_ID unset — deploy without verify; run make verify-arbitrum later"; \
 	fi; \
-	( cd $(EVM_DIR) && forge script script/BootstrapArbitrum.s.sol:BootstrapArbitrum \
-		--rpc-url $$ARBITRUM_RPC_URL --broadcast --slow $$VERIFY_FLAGS -vvvv ) 2>&1 | tee $(ARBITRUM_BOOTSTRAP_LOG) && \
-	bash $(EVM_DIR)/scripts/write-arbitrum-env.sh $(ARBITRUM_BOOTSTRAP_LOG) $(EVM_DIR)/.env.arbitrum'
-	@echo "Bootstrap done. Ownership NOT renounced. See $(EVM_DIR)/.env.arbitrum"
-	@echo "If verify was skipped or partial: make verify-arbitrum"
+	( cd $(EVM_DIR) && forge script script/PhoenixLaunch.s.sol:LaunchProtocol \
+		--rpc-url $$RPC --broadcast --slow $$VERIFY_FLAGS -vvvv ) 2>&1 | tee $(LAUNCH_LOG) && \
+	bash $(EVM_DIR)/scripts/write-arbitrum-env.sh $(LAUNCH_LOG) $(LIVE_ENV)'
+	@echo "Launch (wire) done. No LP yet. Next: make seed. See $(LIVE_ENV)"
+
+seed: evm-build
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
+	@bash -eo pipefail -c '\
+	set -a && . $(LIVE_ENV) && set +a && \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
+	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make launch" && exit 1); \
+	RPC="$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-$${RPC_URL:-}}}"; \
+	test -n "$$RPC" || (echo "RPC URL missing" && exit 1); \
+	cd $(EVM_DIR) && forge script script/PhoenixLaunch.s.sol:SeedProtocol \
+		--rpc-url $$RPC --broadcast --slow -vvvv'
+	@echo "Seed done. Optional next: make lock (set RECIPIENT_APPROVER + BUYBACK_CALLERS first)"
+
+lock: evm-build
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
+	@bash -eo pipefail -c '\
+	set -a && . $(LIVE_ENV) && set +a && \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
+	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make launch" && exit 1); \
+	test -n "$$RECIPIENT_APPROVER" || (echo "RECIPIENT_APPROVER missing" && exit 1); \
+	test -n "$$BUYBACK_CALLERS" || (echo "BUYBACK_CALLERS missing" && exit 1); \
+	RPC="$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-$${RPC_URL:-}}}"; \
+	test -n "$$RPC" || (echo "RPC URL missing" && exit 1); \
+	cd $(EVM_DIR) && forge script script/PhoenixLaunch.s.sol:LockProtocol \
+		--rpc-url $$RPC --broadcast --slow -vvvv'
+	@echo "Lock done. Ownable renounced. Roles on RECIPIENT_APPROVER."
+
+launch-arbitrum:
+	$(MAKE) --no-print-directory launch LIVE_CLUSTER=arbitrum
+
+seed-arbitrum:
+	$(MAKE) --no-print-directory seed LIVE_CLUSTER=arbitrum
+
+lock-arbitrum:
+	$(MAKE) --no-print-directory lock LIVE_CLUSTER=arbitrum
 
 verify-arbitrum: evm-build
 	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
@@ -151,7 +192,7 @@ verify-arbitrum: evm-build
 open-trading-arbitrum: evm-build
 	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
 	@set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
-	test -n "$$ANTI_BOT_OPEN_SELL" || (echo "ANTI_BOT_OPEN_SELL missing — run make bootstrap-arbitrum" && exit 1); \
+	test -n "$$ANTI_BOT_OPEN_SELL" || (echo "ANTI_BOT_OPEN_SELL missing — run make launch && make seed" && exit 1); \
 	cd $(EVM_DIR) && AMOUNT_WHOLE="$(or $(AMOUNT_WHOLE),1)" \
 		forge script script/OpenTrading.s.sol:OpenTrading \
 		--rpc-url $$ARBITRUM_RPC_URL --broadcast --slow -vvvv
