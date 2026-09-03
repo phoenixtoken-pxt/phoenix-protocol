@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-// Uniswap v4 addresses we care about (Base Sepolia + Base).
+// Uniswap v4 addresses we care about (Base Sepolia + Base + Arbitrum One).
 library V4Addresses {
     // --- Base Sepolia (84532) ---
     address constant BASE_SEPOLIA_POOL_MANAGER = 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408;
@@ -19,6 +19,16 @@ library V4Addresses {
     address constant BASE_STATE_VIEW = 0xA3c0c9b65baD0b08107Aa264b0f3dB444b867A71;
     address constant BASE_QUOTER = 0x0d5e0F971ED27FBfF6c2837bf31316121532048D;
     address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+
+    // --- Arbitrum One (42161) ---
+    // https://developers.uniswap.org/contracts/v4/deployments
+    address constant ARBITRUM_POOL_MANAGER = 0x360E68faCcca8cA495c1B759Fd9EEe466db9FB32;
+    address constant ARBITRUM_POSITION_MANAGER = 0xd88F38F930b7952f2DB2432Cb002E7abbF3dD869;
+    address constant ARBITRUM_UNIVERSAL_ROUTER = 0xA51afAFe0263b40EdaEf0Df8781eA9aa03E381a3;
+    address constant ARBITRUM_STATE_VIEW = 0x76Fd297e2D437cd7f76d50F01AfE6160f86e9990;
+    address constant ARBITRUM_QUOTER = 0x3972C00f7ed4885e145823eb7C655375d275A1C5;
+    /// @dev Native USDC (Circle), not bridged USDC.e.
+    address constant ARBITRUM_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
 
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 }

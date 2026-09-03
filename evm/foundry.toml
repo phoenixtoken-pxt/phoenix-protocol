@@ -71,6 +71,8 @@ fail_on_revert = true
 [rpc_endpoints]
 anvil = "http://127.0.0.1:8545"
 base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+arbitrum = "${ARBITRUM_RPC_URL}"
 
 [etherscan]
 base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api.etherscan.io/v2/api?chainid=84532", chain = 84532 }
+arbitrum = { key = "${ARBISCAN_API_KEY}", url = "https://api.etherscan.io/v2/api?chainid=42161", chain = 42161 }

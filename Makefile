@@ -33,6 +33,7 @@ ANVIL_ACCOUNTS ?= 11
         status-anvil collect-fees-anvil execute-buyback-anvil demo-buyback-anvil \
         mint-musdc-anvil distribute-pxt-anvil fund-testers-anvil \
         fund-eth-anvil fund-all-eth-anvil \
+        bootstrap-arbitrum open-trading-arbitrum check-arbitrum-funds verify-arbitrum \
         web-deps web-dev web-env \
         explorer explorer-stop
 
@@ -53,6 +54,13 @@ help:
 	@echo "  make execute-buyback-anvil                Authorized executeBuyback (after lock: BUYBACK_CALLER_KEY)"
 	@echo "  make demo-buyback-anvil                   Full local buyback dry-run"
 	@echo "  make fund-testers-anvil / distribute-pxt-anvil / web-dev"
+	@echo ""
+	@echo "Arbitrum One test deploy (no lock):"
+	@echo "  make check-arbitrum-funds                 ETH + USDC balances for admin"
+	@echo "  make bootstrap-arbitrum                   Deploy unlocked stack + \$20 LP @ 0.001"
+	@echo "  make verify-arbitrum                      Verify contracts on Arbiscan"
+	@echo "  make open-trading-arbitrum                After sell unlock: clear anti-bot + sell"
+	@echo "  See docs/DEPLOY_ARBITRUM.md"
 	@echo ""
 	@echo "  make evm-deps evm-build evm-test"
 
@@ -103,6 +111,50 @@ anvil-base-sepolia-fork:
 	anvil --fork-url $$url --chain-id 84532 --port 8545 --block-time 1 --accounts $(ANVIL_ACCOUNTS)
 
 BOOTSTRAP_LOG := /tmp/pxt-bootstrap-fork.log
+ARBITRUM_BOOTSTRAP_LOG := /tmp/pxt-bootstrap-arbitrum.log
+
+# --- Arbitrum One (test, unlocked) ---
+check-arbitrum-funds:
+	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
+	@set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
+	echo "Admin: $$ADMIN_ADDRESS" && \
+	echo -n "ETH:  " && cast balance $$ADMIN_ADDRESS --rpc-url $$ARBITRUM_RPC_URL && \
+	echo -n "USDC: " && cast call $$QUOTE_TOKEN_ADDRESS "balanceOf(address)(uint256)" $$ADMIN_ADDRESS --rpc-url $$ARBITRUM_RPC_URL && \
+	echo "(need >= 20000000 raw USDC = 20 USDC; ~0.01 ETH for gas)"
+
+bootstrap-arbitrum: evm-build
+	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum — see docs/DEPLOY_ARBITRUM.md" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/write-arbitrum-env.sh
+	@bash -eo pipefail -c '\
+	set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing in .env.arbitrum" && exit 1); \
+	test -n "$$ARBITRUM_RPC_URL" || (echo "ARBITRUM_RPC_URL missing" && exit 1); \
+	VERIFY_FLAGS=""; \
+	API_KEY="$${ARBISCAN_API_KEY:-$${ETHERSCAN_API_KEY:-}}"; \
+	if [ -n "$$API_KEY" ]; then \
+	  VERIFY_FLAGS="--verify --etherscan-api-key $$API_KEY --verifier-url https://api.etherscan.io/v2/api?chainid=42161"; \
+	  echo "Arbiscan verification enabled during broadcast"; \
+	else \
+	  echo "WARN: ARBISCAN_API_KEY unset — deploy without verify; run make verify-arbitrum later"; \
+	fi; \
+	( cd $(EVM_DIR) && forge script script/BootstrapArbitrum.s.sol:BootstrapArbitrum \
+		--rpc-url $$ARBITRUM_RPC_URL --broadcast --slow $$VERIFY_FLAGS -vvvv ) 2>&1 | tee $(ARBITRUM_BOOTSTRAP_LOG) && \
+	bash $(EVM_DIR)/scripts/write-arbitrum-env.sh $(ARBITRUM_BOOTSTRAP_LOG) $(EVM_DIR)/.env.arbitrum'
+	@echo "Bootstrap done. Ownership NOT renounced. See $(EVM_DIR)/.env.arbitrum"
+	@echo "If verify was skipped or partial: make verify-arbitrum"
+
+verify-arbitrum: evm-build
+	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/verify-arbitrum.sh
+	@bash $(EVM_DIR)/scripts/verify-arbitrum.sh $(EVM_DIR)/.env.arbitrum
+
+open-trading-arbitrum: evm-build
+	@test -f $(EVM_DIR)/.env.arbitrum || (echo "Missing $(EVM_DIR)/.env.arbitrum" && exit 1)
+	@set -a && . $(EVM_DIR)/.env.arbitrum && set +a && \
+	test -n "$$ANTI_BOT_OPEN_SELL" || (echo "ANTI_BOT_OPEN_SELL missing — run make bootstrap-arbitrum" && exit 1); \
+	cd $(EVM_DIR) && AMOUNT_WHOLE="$(or $(AMOUNT_WHOLE),1)" \
+		forge script script/OpenTrading.s.sol:OpenTrading \
+		--rpc-url $$ARBITRUM_RPC_URL --broadcast --slow -vvvv
 
 bootstrap-return-delta-anvil: bootstrap-anvil
 

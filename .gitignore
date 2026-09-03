@@ -10,6 +10,7 @@ evm/lib/
 evm/.anvil-session.env
 evm/.env.*
 !evm/.env.anvil.example
+!evm/.env.arbitrum.example
 web/.env
 public-web/*
 evm/audit/audit.pdf
