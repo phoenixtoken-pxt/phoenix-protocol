@@ -1,0 +1,12 @@
+{
+  "name": "Phoenix Token",
+  "symbol": "PXT",
+  "description": "Phoenix Token (PXT) — ERC-20 with Uniswap v4 ReturnDelta hook economics (sell lock, anti-bot, fee recycling).",
+  "decimals": 6,
+  "image": "{{IMAGE_URI}}",
+  "external_url": "{{EXTERNAL_URL}}",
+  "properties": {
+    "category": "fungible",
+    "contractName": "Pxt"
+  }
+}

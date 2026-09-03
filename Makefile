@@ -37,6 +37,7 @@ ANVIL_ACCOUNTS ?= 12
         seed-precheck seed seed-check \
         lock-precheck lock lock-check \
         check-funds verify open-trading \
+        token-metadata deploy-token-icon deploy-token-metadata \
         web-deps web-dev web-env \
         explorer explorer-stop
 
@@ -73,6 +74,11 @@ help:
 	@echo "  make launch CLUSTER=anvil                   local fork + mUSDC"
 	@echo "  make launch CLUSTER=base                   evm/.env.base"
 	@echo "  See docs/DEPLOY_ARBITRUM.md"
+	@echo ""
+	@echo "Token metadata (after make launch; PINATA_JWT in evm/.env.secrets):"
+	@echo "  make token-metadata CLUSTER=arbitrum"
+	@echo "  make deploy-token-metadata CLUSTER=arbitrum"
+	@echo "  See docs/TOKEN_METADATA.md"
 	@echo ""
 	@echo "  make evm-deps evm-build evm-test"
 
@@ -517,3 +523,19 @@ explorer:
 explorer-stop:
 	@docker rm -f $(EXPLORER_NAME) >/dev/null 2>&1 && \
 		echo "Stopped $(EXPLORER_NAME)" || echo "No container named $(EXPLORER_NAME)"
+
+token-metadata:
+	@chmod +x scripts/token-metadata/prepare.sh
+	@CLUSTER="$(or $(CLUSTER),arbitrum)" bash scripts/token-metadata/prepare.sh
+
+deploy-token-icon:
+	@chmod +x scripts/token-metadata/deploy-icon.sh scripts/token-metadata/pinata-upload.sh scripts/token-metadata/load-env.sh
+	@bash scripts/token-metadata/deploy-icon.sh
+
+deploy-token-metadata:
+	@chmod +x scripts/token-metadata/deploy-metadata.sh \
+		scripts/token-metadata/deploy-icon.sh \
+		scripts/token-metadata/prepare.sh \
+		scripts/token-metadata/pinata-upload.sh \
+		scripts/token-metadata/load-env.sh
+	@CLUSTER="$(or $(CLUSTER),arbitrum)" bash scripts/token-metadata/deploy-metadata.sh

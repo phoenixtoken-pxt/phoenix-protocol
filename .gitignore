@@ -10,9 +10,14 @@ evm/lib/
 evm/.anvil-session.env
 evm/.env.*
 evm/env.anvil
+evm/.env.secrets
 !evm/.env.anvil.example
 !evm/.env.arbitrum.example
 !evm/.env.base.example
+!evm/.env.secrets.example
+packages/token-metadata/out/
+packages/token-metadata/deployed.env
+packages/token-metadata/.env
 web/.env
 public-web/*
 evm/audit/audit.pdf
