@@ -8,9 +8,11 @@ import {Script} from "forge-std/Script.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 
@@ -24,10 +26,16 @@ import {DEFAULT_SELL_UNLOCK_TIMESTAMP} from "../src/core/PxtFeeModel.sol";
 import {WalletStatusConfig} from "./WalletStatusConfig.sol";
 
 /// @notice Live Arbitrum One bootstrap: real USDC, deploy PoolSwapTest, seed LP, do NOT lock.
-/// @dev Env: PRIVATE_KEY, POOL_MANAGER, QUOTE_TOKEN_ADDRESS, LP_SEED_*_WHOLE, SELL_UNLOCK_TIMESTAMP,
-///      DONATION_WALLET, MARKETING_WALLET. Optional FEE_EXEMPT_WALLETS / NO_PENALTY_WALLETS.
+/// @dev Same wiring as BootstrapReturnDeltaFork: official pool, FeeCollector seed, one-shot
+///      collector/attributor, FeeExempt collector before addLiquidity (STCBT), afterAddLiquidity
+///      hook flag (PTTB). Lock is a separate LockProtocolReturnDelta step.
+/// Env: PRIVATE_KEY, POOL_MANAGER, QUOTE_TOKEN_ADDRESS, LP_SEED_*_WHOLE, SELL_UNLOCK_TIMESTAMP,
+///      DONATION_WALLET, MARKETING_WALLET. Optional FEE_EXEMPT_WALLETS / NO_PENALTY_WALLETS /
+///      BUYBACK_CALLERS.
 contract BootstrapArbitrum is Script, WalletStatusConfig {
     using CurrencyLibrary for Currency;
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     uint24 internal constant LP_FEE = 0;
     int24 internal constant TICK_SPACING = 60;
@@ -89,9 +97,10 @@ contract BootstrapArbitrum is Script, WalletStatusConfig {
             revert("SELL_UNLOCK_TIMESTAMP is in the past");
         }
 
+        // Must match PhoenixV4ReturnDeltaHook.flags() / getHookPermissions (PTTB afterAddLiquidity).
         uint160 hookFlags = uint160(
-            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
-                | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
+            Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_SWAP_FLAG
+                | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG | Hooks.AFTER_SWAP_RETURNS_DELTA_FLAG
         );
 
         uint256 unit = 10 ** uint256(quoteDecimals);
@@ -127,6 +136,7 @@ contract BootstrapArbitrum is Script, WalletStatusConfig {
         d.pxt.setApprovedContractRecipient(address(d.hook), true);
         d.pxt.setWalletStatus(address(d.hook), Pxt.WalletStatus.FeeExempt);
         d.pxt.setApprovedContractRecipient(address(d.feeCollector), true);
+        // STCBT: inbound owner→collector seed is taxed unless the collector is FeeExempt.
         d.pxt.setWalletStatus(address(d.feeCollector), Pxt.WalletStatus.FeeExempt);
         d.pxt.setSellAttributor(d.hook);
         d.pxt.setApprovedContractRecipient(address(d.swapRouter), true);
@@ -152,6 +162,8 @@ contract BootstrapArbitrum is Script, WalletStatusConfig {
         );
 
         d.poolManager.initialize(d.poolKey, d.sqrtPriceX96);
+        (uint160 spot,,,) = d.poolManager.getSlot0(d.poolKey.toId());
+        require(spot == d.sqrtPriceX96, "sqrtPrice mismatch after initialize");
 
         d.feeCollector.configurePool(d.poolKey, TICK_LOWER, TICK_UPPER, bytes32(0));
 
@@ -173,7 +185,10 @@ contract BootstrapArbitrum is Script, WalletStatusConfig {
         uint16 buybackSlip = uint16(vm.envOr("BUYBACK_MAX_SLIPPAGE_BPS", uint256(200)));
         d.feeCollector.setBuybackParams(recycleWidth, buybackSlip);
 
+        _applyBuybackCallersFromEnv(d.feeCollector, address(0));
+
         // Intentionally NOT locking / renouncing — Arbitrum test deploy keeps admin control.
+        // Production: make lock-anvil equivalent via LockProtocolReturnDelta + RECIPIENT_APPROVER.
 
         vm.stopBroadcast();
     }
@@ -299,6 +314,9 @@ contract BootstrapArbitrum is Script, WalletStatusConfig {
         console2.log("Anti-bot seller (openSell helper):", d.antiBotSeller);
         console2.log("Anti-bot operator (funds open):", d.openSell.operator());
         console2.log("PhoenixAntiBotOpenSell:", address(d.openSell));
+        console2.log("sellAttributor:", address(d.pxt.sellAttributor()));
+        console2.log("seedLiquidityAdded:", d.feeCollector.seedLiquidityAdded());
+        console2.log("maxBuybackSlippageBps:", d.feeCollector.maxBuybackSlippageBps());
         console2.log("Sell unlock timestamp:", d.pxt.sellUnlockTimestamp());
         console2.log("Block timestamp:", block.timestamp);
         console2.log("Admin PXT balance:", d.pxt.balanceOf(d.admin));
