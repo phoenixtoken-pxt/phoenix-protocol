@@ -140,6 +140,8 @@ else
   else
     ok "QUOTE_TOKEN_ADDRESS $QUOTE has code"
   fi
+  # Create-token does not spend quote — USDC is required only for make seed.
+  # Soft-warn here; seed-precheck hard-fails if underfunded.
   if [[ -n "$ADMIN" ]]; then
     unit=1
     i=0
@@ -149,27 +151,31 @@ else
     done
     NEED=$((SEED_WHOLE * unit))
     HAVE=$(uint "$(cast call "$QUOTE" "balanceOf(address)(uint256)" "$ADMIN" --rpc-url "$RPC")")
-    echo "  …    quote balance $HAVE (need $NEED raw for LP_SEED_USDC_WHOLE=$SEED_WHOLE)"
+    echo "  …    quote balance $HAVE (optional until seed; LP_SEED_USDC_WHOLE=$SEED_WHOLE → $NEED raw)"
     if [[ "$HAVE" -lt "$NEED" ]]; then
-      fail "admin quote balance < LP seed (need $NEED, have $HAVE)"
+      warn "admin quote < planned LP seed — OK for create-token; fund before make seed"
     else
-      ok "admin holds enough quote for seed"
+      ok "admin holds enough quote for later seed"
     fi
   fi
 fi
 
-if [[ -n "${PHOENIX_ORCHESTRATOR:-}" ]]; then
-  OCODE=$(cast code "$PHOENIX_ORCHESTRATOR" --rpc-url "$RPC" 2>/dev/null || true)
+# Only trust PHOENIX_ORCHESTRATOR from this env file — Makefile may export
+# evm/.env.anvil into the recipe and falsely trip this on CLUSTER=base.
+ORCH_FROM_FILE=$(grep -E '^PHOENIX_ORCHESTRATOR=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+ORCH_FROM_FILE="${ORCH_FROM_FILE//$'\r'/}"
+if [[ -n "$ORCH_FROM_FILE" ]]; then
+  OCODE=$(cast code "$ORCH_FROM_FILE" --rpc-url "$RPC" 2>/dev/null || true)
   if [[ -n "$OCODE" && "$OCODE" != "0x" ]]; then
-    warn "PHOENIX_ORCHESTRATOR already deployed at $PHOENIX_ORCHESTRATOR — launch will create a new stack"
+    warn "PHOENIX_ORCHESTRATOR already deployed at $ORCH_FROM_FILE — clear it (or new LAUNCH_SALT) for a fresh create-token"
   else
-    warn "PHOENIX_ORCHESTRATOR is set but has no code (stale env after a new fork? copy .example)"
+    warn "PHOENIX_ORCHESTRATOR is set in $ENV_FILE but has no code on this RPC (stale?)"
   fi
 fi
 
 echo ""
 if [[ "$FAIL" -ne 0 ]]; then
-  echo "FAILED — fix the items above before make launch CLUSTER=$CLUSTER"
+  echo "FAILED — fix the items above before make create-token CLUSTER=$CLUSTER"
   exit 1
 fi
-echo "READY — make launch CLUSTER=$CLUSTER"
+echo "READY — make create-token CLUSTER=$CLUSTER"

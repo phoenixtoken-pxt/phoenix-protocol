@@ -7,8 +7,7 @@ import {ZeroAddress} from "../../src/core/PxtFeeModel.sol";
 import {PhoenixLaunchTypes} from "./PhoenixLaunchTypes.sol";
 import {PhoenixOrchestrator} from "./PhoenixOrchestrator.sol";
 
-/// @notice Factory: one client tx deploys an orchestrator and wires the PXT stack (no LP yet).
-///         Child CREATE2 deployers are set at construction so this contract stays under EIP-170.
+/// @notice Factory: CREATE2-deploy a per-owner PhoenixOrchestrator (4-phase ceremony).
 contract PhoenixLauncher {
     address public immutable pxtDeployer;
     address public immutable hookDeployer;
@@ -17,7 +16,7 @@ contract PhoenixLauncher {
 
     mapping(address => address) public latestOrchestrator;
 
-    event Launched(address indexed owner, address indexed orchestrator, bytes32 salt);
+    event Created(address indexed owner, address indexed orchestrator, bytes32 salt);
 
     error SaltRequired();
     error OrchestratorMismatch();
@@ -34,41 +33,37 @@ contract PhoenixLauncher {
         openSellDeployer = openSellDeployer_;
     }
 
-    /// @notice CREATE2-deploy orchestrator for `msg.sender` and call `wire`.
-    function launch(bytes32 salt, PhoenixLaunchTypes.LaunchParams calldata params)
-        external
-        returns (PhoenixOrchestrator orchestrator)
-    {
-        return launchFor(msg.sender, salt, params);
+    /// @notice CREATE2-deploy orchestrator for `msg.sender` (no token yet).
+    function create(bytes32 salt) external returns (PhoenixOrchestrator orchestrator) {
+        return createFor(msg.sender, salt);
     }
 
-    /// @notice Developer-signed wire: `owner` is `launchOwner` (must approve USDC + `seed` / `lock`).
-    /// @dev Mine `params.hookSalt` with deployer = `hookDeployer` and Pxt = CREATE2 from `pxtDeployer`
-    ///      (see `pxtCreate2Salt(predictOrchestrator(owner, salt))`).
-    function launchFor(address owner, bytes32 salt, PhoenixLaunchTypes.LaunchParams calldata params)
-        public
-        returns (PhoenixOrchestrator orchestrator)
-    {
+    function createFor(address owner, bytes32 salt) public returns (PhoenixOrchestrator orchestrator) {
         if (owner == address(0)) revert ZeroAddress();
         if (salt == bytes32(0)) revert SaltRequired();
+
         bytes32 orchSalt = _orchSalt(owner, salt);
         address predicted = predictOrchestrator(owner, salt);
-        orchestrator = new PhoenixOrchestrator{salt: orchSalt}(address(this), owner);
-        if (address(orchestrator) != predicted) revert OrchestratorMismatch();
-        orchestrator.wire(
-            params,
-            PhoenixLaunchTypes.Deployers({
-                pxt: pxtDeployer, hook: hookDeployer, collector: collectorDeployer, openSell: openSellDeployer
-            })
+        orchestrator = new PhoenixOrchestrator{salt: orchSalt}(
+            address(this),
+            owner,
+            pxtDeployer,
+            hookDeployer,
+            collectorDeployer,
+            openSellDeployer
         );
+        if (address(orchestrator) != predicted) revert OrchestratorMismatch();
         latestOrchestrator[owner] = address(orchestrator);
-        emit Launched(owner, address(orchestrator), salt);
+        emit Created(owner, address(orchestrator), salt);
     }
 
     function predictOrchestrator(address owner, bytes32 salt) public view returns (address) {
         if (owner == address(0)) revert ZeroAddress();
         bytes32 orchSalt = _orchSalt(owner, salt);
-        bytes memory init = abi.encodePacked(type(PhoenixOrchestrator).creationCode, abi.encode(address(this), owner));
+        bytes memory init = abi.encodePacked(
+            type(PhoenixOrchestrator).creationCode,
+            abi.encode(address(this), owner, pxtDeployer, hookDeployer, collectorDeployer, openSellDeployer)
+        );
         return Create2.computeAddress(orchSalt, keccak256(init), address(this));
     }
 

@@ -52,6 +52,25 @@ ceremony_unset_empty() {
   done
 }
 
+# Makefile includes evm/.env.anvil by default and exports it into every recipe.
+# Clear those before sourcing evm/.env.base|arbitrum so live launches do not inherit
+# Anvil OPEN_SELL_OPERATOR / POOL_SWAP_TEST / prior stack addresses.
+ceremony_clear_inherited_cluster_env() {
+  unset \
+    OPEN_SELL_OPERATOR ANTI_BOT_OPERATOR ANTI_BOT_SELLER ANTI_BOT_OPEN_SELL \
+    POOL_SWAP_TEST POOL_MODIFY_LIQUIDITY_TEST \
+    PXT_ADDRESS PHOENIX_HOOK FEE_COLLECTOR PHOENIX_LAUNCHER PHOENIX_ORCHESTRATOR \
+    POOL_CURRENCY0 POOL_CURRENCY1 LAUNCH_OWNER LAUNCH_SALT \
+    ADMIN_ADDRESS PRIVATE_KEY DONATION_WALLET MARKETING_WALLET \
+    FEE_EXEMPT_WALLETS NO_PENALTY_WALLETS NO_PENALTY_WALLET \
+    RECIPIENT_APPROVER BUYBACK_CALLERS SELL_UNLOCK_TIMESTAMP \
+    RPC_URL BASE_RPC_URL ARBITRUM_RPC_URL ANVIL_RPC_URL FORK_CHAIN_ID \
+    POOL_MANAGER POSITION_MANAGER UNIVERSAL_ROUTER STATE_VIEW QUOTER PERMIT2 \
+    QUOTE_TOKEN_ADDRESS QUOTE_DECIMALS LP_SEED_USDC_WHOLE LP_SEED_PXT_WHOLE \
+    BUYBACK_RECYCLE_WIDTH_SPACINGS BUYBACK_MAX_SLIPPAGE_BPS SQRT_PRICE_X96 \
+    EVM_CLUSTER HOOK_MODE USE_MOCK_USDC
+}
+
 need_rpc() {
   if ! CHAIN_ID=$(cast chain-id --rpc-url "$RPC" 2>/dev/null); then
     fail "RPC not reachable ($RPC)"
@@ -104,10 +123,30 @@ need_stack() {
   fi
 }
 
+owners_are_admin() {
+  eq_addr "Pxt owner (admin/launchOwner)" "$PXT_OWNER" "$LAUNCH_OWNER"
+  eq_addr "Hook owner (admin/launchOwner)" "$HOOK_OWNER" "$LAUNCH_OWNER"
+  eq_addr "FeeCollector owner (admin/launchOwner)" "$FC_OWNER" "$LAUNCH_OWNER"
+}
+
+# Back-compat alias (old orch-owned ceremony).
+owners_are_orchestrator() {
+  owners_are_admin
+}
+
+owners_renounced() {
+  local z
+  z=$(lc "$ZERO")
+  eq_addr "Pxt owner (renounced)" "$PXT_OWNER" "$z"
+  eq_addr "Hook owner (renounced)" "$HOOK_OWNER" "$z"
+  eq_addr "FeeCollector owner (renounced)" "$FC_OWNER" "$z"
+}
+
 load_state() {
   WIRED=$(cast call "$ORCH" "wired()(bool)" --rpc-url "$RPC")
   LOCKED=$(cast call "$ORCH" "locked()(bool)" --rpc-url "$RPC")
   SEEDED=$(cast call "$FC" "seedLiquidityAdded()(bool)" --rpc-url "$RPC")
+  PHASE=$(cast call "$ORCH" "phase()(uint8)" --rpc-url "$RPC")
   LAUNCH_OWNER=$(cast call "$ORCH" "launchOwner()(address)" --rpc-url "$RPC")
   PXT_OWNER=$(cast call "$PXT" "owner()(address)" --rpc-url "$RPC")
   HOOK_OWNER=$(cast call "$HOOK" "owner()(address)" --rpc-url "$RPC")
@@ -119,27 +158,12 @@ need_signer_is_launch_owner() {
     fail "PRIVATE_KEY missing"
     return 1
   fi
-  local derived
   DERIVED=$(cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null || true)
   if [[ -z "$DERIVED" ]]; then
     fail "PRIVATE_KEY is not a valid key"
     return 1
   fi
   eq_addr "signer is launchOwner" "$DERIVED" "$LAUNCH_OWNER"
-}
-
-owners_are_orchestrator() {
-  eq_addr "Pxt owner (orchestrator)" "$PXT_OWNER" "$ORCH"
-  eq_addr "Hook owner (orchestrator)" "$HOOK_OWNER" "$ORCH"
-  eq_addr "FeeCollector owner (orchestrator)" "$FC_OWNER" "$ORCH"
-}
-
-owners_renounced() {
-  local z
-  z=$(lc "$ZERO")
-  eq_addr "Pxt owner (renounced)" "$PXT_OWNER" "$z"
-  eq_addr "Hook owner (renounced)" "$HOOK_OWNER" "$z"
-  eq_addr "FeeCollector owner (renounced)" "$FC_OWNER" "$z"
 }
 
 position_liq() {

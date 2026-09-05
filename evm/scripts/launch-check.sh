@@ -127,7 +127,7 @@ if [[ -n "$OWNER" && -n "$QUOTE" && "$SEEDED" != true ]]; then
   HAVE=$(uint "$(cast call "$QUOTE" "balanceOf(address)(uint256)" "$OWNER" --rpc-url "$RPC")")
   echo "  …    owner quote $HAVE (orchestrator.usdcSeed=$USDC_SEED)"
   if [[ "$HAVE" -lt "$USDC_SEED" ]]; then
-    fail "owner quote < usdcSeed — cannot seed yet"
+    warn "owner quote < usdcSeed — OK for wire-only; fund before make seed"
   else
     ok "owner holds enough quote for make seed"
   fi

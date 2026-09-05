@@ -15,8 +15,17 @@ NAME="${2:-$(basename "$FILE")}"
   echo "PINATA_JWT is not set. Add it to evm/.env.secrets (see evm/.env.secrets.example)." >&2
   exit 1
 }
+# Pinata expects a JWT (header.payload.signature). API keys / truncated values fail with
+# INVALID_CREDENTIALS "token contains an invalid number of segments".
+_jwt_dot_count="${PINATA_JWT//[^.]}"
+if [[ ${#_jwt_dot_count} -ne 2 ]]; then
+  echo "PINATA_JWT looks malformed (expected a JWT with 3 dot-separated segments)." >&2
+  echo "Put a Pinata JWT in evm/.env.secrets (see docs/TOKEN_METADATA.md)." >&2
+  exit 1
+fi
 
-GATEWAY="${PINATA_GATEWAY:-https://gateway.pinata.cloud/ipfs}"
+# Public gateway for logoURI / wallet imports (Pinata shared gateway often prompts for auth).
+GATEWAY="${PINATA_GATEWAY:-https://ipfs.io/ipfs}"
 
 RESP="$(curl -sS -X POST "https://api.pinata.cloud/pinning/pinFileToIPFS" \
   -H "Authorization: Bearer $PINATA_JWT" \

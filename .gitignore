@@ -20,4 +20,5 @@ packages/token-metadata/deployed.env
 packages/token-metadata/.env
 web/.env
 public-web/*
-evm/audit/audit.pdf
+docs/
+evm/audit/

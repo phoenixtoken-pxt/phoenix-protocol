@@ -21,6 +21,17 @@ _load_env_file() {
       continue
     fi
     val="${line#*=}"
+    # Strip optional surrounding quotes from .env values.
+    if [[ ${#val} -ge 2 ]]; then
+      if [[ ( "${val:0:1}" == '"' && "${val: -1}" == '"' ) || ( "${val:0:1}" == "'" && "${val: -1}" == "'" ) ]]; then
+        val="${val:1:${#val}-2}"
+      fi
+    fi
+    # Allow Bearer prefix in PINATA_JWT; pinata-upload adds Authorization: Bearer.
+    if [[ "$key" == PINATA_JWT && "${val,,}" == bearer\ * ]]; then
+      val="${val#*[Bb][Ee][Aa][Rr][Ee][Rr] }"
+      val="${val# }"
+    fi
     export "$key=$val"
   done <"$f"
 }

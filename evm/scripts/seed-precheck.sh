@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ready-to-seed checks after `make launch`.
+# Ready-to-seed checks after `make deploy-pool`.
 # Usage: seed-precheck.sh <env-file> [cluster]
 set -euo pipefail
 # shellcheck source=ceremony-lib.sh
@@ -12,9 +12,9 @@ need_stack
 load_state
 need_signer_is_launch_owner
 
-[[ "$WIRED" = true ]] && ok "orchestrator.wired" || fail "orchestrator.wired=$WIRED — run make launch first"
+[[ "$WIRED" = true ]] && ok "orchestrator.wired" || fail "orchestrator.wired=$WIRED — run make deploy-pool first"
 [[ "$LOCKED" = false ]] && ok "orchestrator.locked=false" || fail "already locked"
-owners_are_orchestrator
+owners_are_admin
 
 if [[ "$SEEDED" = true ]]; then
   fail "seedLiquidityAdded=true — already seeded; skip make seed"
@@ -22,13 +22,13 @@ else
   ok "seedLiquidityAdded=false"
 fi
 
-ORCH_PXT_BAL=$(uint "$(cast call "$PXT" "balanceOf(address)(uint256)" "$ORCH" --rpc-url "$RPC")")
 PXT_SEED=$(uint "$(cast call "$ORCH" "pxtSeed()(uint256)" --rpc-url "$RPC")")
-echo "  …    orchestrator PXT $ORCH_PXT_BAL (pxtSeed=$PXT_SEED)"
-if [[ "$ORCH_PXT_BAL" == 0 ]]; then
-  fail "orchestrator PXT balance is 0"
+ADMIN_PXT=$(uint "$(cast call "$PXT" "balanceOf(address)(uint256)" "$LAUNCH_OWNER" --rpc-url "$RPC")")
+echo "  …    admin PXT $ADMIN_PXT (pxtSeed=$PXT_SEED)"
+if [[ "$ADMIN_PXT" -lt "$PXT_SEED" ]]; then
+  fail "admin PXT < pxtSeed — cannot seed"
 else
-  ok "orchestrator holds PXT for seed"
+  ok "admin holds enough PXT for seed"
 fi
 
 USDC_SEED=$(uint "$(cast call "$ORCH" "usdcSeed()(uint256)" --rpc-url "$RPC")")

@@ -9,7 +9,7 @@ OUT_DIR="$META_DIR/out"
 CLUSTER="${CLUSTER:-arbitrum}"
 ENV_FILE="$ROOT/evm/.env.${CLUSTER}"
 
-EXTERNAL_URL="${EXTERNAL_URL:-https://phoenixtoken.net}"
+EXTERNAL_URL="${EXTERNAL_URL:-https://phoenixproject.community/}"
 IMAGE_URI="${IMAGE_URI:-}"
 
 [[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE" >&2; exit 1; }

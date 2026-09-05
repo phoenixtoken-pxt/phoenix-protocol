@@ -1,7 +1,7 @@
 {
   "name": "Phoenix Token",
   "symbol": "PXT",
-  "description": "Phoenix Token (PXT) — ERC-20 with Uniswap v4 ReturnDelta hook economics (sell lock, anti-bot, fee recycling).",
+  "description": "Phoenix Token (PXT) is the utility token of the Phoenix Project ecosystem - built for long-term community value through sustainable liquidity mechanisms, transparent fee flows (donations, marketing, burn, and buyback), and a model focused on real participation rather than short-term speculation.",
   "decimals": 6,
   "image": "{{IMAGE_URI}}",
   "external_url": "{{EXTERNAL_URL}}",

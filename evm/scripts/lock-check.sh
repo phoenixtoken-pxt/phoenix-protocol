@@ -25,12 +25,12 @@ else
 
   PXT_ADMIN=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$ADMIN_ROLE" "$APPROVER" --rpc-url "$RPC")
   PXT_APPR=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$APPROVER_ROLE" "$APPROVER" --rpc-url "$RPC")
-  ORCH_ADMIN=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$ADMIN_ROLE" "$ORCH" --rpc-url "$RPC")
-  ORCH_APPR=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$APPROVER_ROLE" "$ORCH" --rpc-url "$RPC")
+  LAUNCH_ADMIN=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$ADMIN_ROLE" "$LAUNCH_OWNER" --rpc-url "$RPC")
+  LAUNCH_APPR=$(cast call "$PXT" "hasRole(bytes32,address)(bool)" "$APPROVER_ROLE" "$LAUNCH_OWNER" --rpc-url "$RPC")
   [[ "$PXT_ADMIN" = true ]] && ok "Pxt DEFAULT_ADMIN_ROLE on RECIPIENT_APPROVER" || fail "Pxt DEFAULT_ADMIN_ROLE not on RECIPIENT_APPROVER"
   [[ "$PXT_APPR" = true ]] && ok "Pxt RECIPIENT_APPROVER_ROLE on RECIPIENT_APPROVER" || fail "Pxt RECIPIENT_APPROVER_ROLE not on RECIPIENT_APPROVER"
-  [[ "$ORCH_ADMIN" = false ]] && ok "orchestrator no longer Pxt admin" || fail "orchestrator still Pxt DEFAULT_ADMIN_ROLE"
-  [[ "$ORCH_APPR" = false ]] && ok "orchestrator no longer Pxt recipient-approver" || fail "orchestrator still RECIPIENT_APPROVER_ROLE"
+  [[ "$LAUNCH_ADMIN" = false ]] && ok "launchOwner no longer Pxt admin" || fail "launchOwner still Pxt DEFAULT_ADMIN_ROLE"
+  [[ "$LAUNCH_APPR" = false ]] && ok "launchOwner no longer Pxt recipient-approver" || fail "launchOwner still RECIPIENT_APPROVER_ROLE"
 
   FC_ADMIN=$(cast call "$FC" "hasRole(bytes32,address)(bool)" "$ADMIN_ROLE" "$APPROVER" --rpc-url "$RPC")
   FC_BB=$(cast call "$FC" "hasRole(bytes32,address)(bool)" "$BUYBACK_ROLE" "$APPROVER" --rpc-url "$RPC")
@@ -38,8 +38,8 @@ else
   [[ "$FC_BB" = true ]] && ok "FeeCollector BUYBACK_EXECUTOR_APPROVER_ROLE on RECIPIENT_APPROVER" || fail "FeeCollector buyback-approver role not on RECIPIENT_APPROVER"
 fi
 
-ORCH_STILL=$(cast call "$FC" "isAuthorizedBuybackCaller(address)(bool)" "$ORCH" --rpc-url "$RPC")
-[[ "$ORCH_STILL" = false ]] && ok "orchestrator is not a buyback caller" || fail "orchestrator still isAuthorizedBuybackCaller"
+ORCH_STILL=$(cast call "$FC" "isAuthorizedBuybackCaller(address)(bool)" "$LAUNCH_OWNER" --rpc-url "$RPC")
+[[ "$ORCH_STILL" = false ]] && ok "launchOwner is not a buyback caller" || fail "launchOwner still isAuthorizedBuybackCaller"
 
 CALLERS="${BUYBACK_CALLERS:-}"
 if [[ -n "$CALLERS" ]]; then
@@ -55,7 +55,7 @@ fi
 ORCH_PXT_BAL=$(uint "$(cast call "$PXT" "balanceOf(address)(uint256)" "$ORCH" --rpc-url "$RPC")")
 echo "  …    orchestrator leftover PXT $ORCH_PXT_BAL"
 if [[ "$ORCH_PXT_BAL" == 0 ]]; then
-  ok "orchestrator PXT swept to launchOwner"
+  ok "orchestrator holds no PXT"
 else
   fail "orchestrator still holds PXT after lock"
 fi

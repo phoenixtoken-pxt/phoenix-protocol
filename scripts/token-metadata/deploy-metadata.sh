@@ -15,6 +15,21 @@ chmod +x \
   "$ROOT/scripts/token-metadata/deploy-icon.sh" \
   "$ROOT/scripts/token-metadata/pinata-upload.sh"
 
+GATEWAY="${PINATA_GATEWAY:-https://ipfs.io/ipfs}"
+GATEWAY="${GATEWAY%/}"
+
+# Rewrite https://…/ipfs/<cid> to $GATEWAY/<cid> (same CID, public host).
+_rewrite_gateway_uri() {
+  local uri="${1:-}"
+  [[ -n "$uri" ]] || return 0
+  local cid="${uri##*/}"
+  [[ "$cid" =~ ^(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[a-z0-9]+)$ ]] || {
+    echo "$uri"
+    return 0
+  }
+  echo "${GATEWAY}/${cid}"
+}
+
 if [[ -f "$META_DIR/deployed.env" ]]; then
   # shellcheck disable=SC1090
   set -a && . "$META_DIR/deployed.env" && set +a
@@ -24,6 +39,10 @@ if [[ -z "${TOKEN_ICON_URI:-}" ]]; then
   "$ROOT/scripts/token-metadata/deploy-icon.sh"
   # shellcheck disable=SC1090
   set -a && . "$META_DIR/deployed.env" && set +a
+else
+  TOKEN_ICON_URI="$(_rewrite_gateway_uri "$TOKEN_ICON_URI")"
+  export TOKEN_ICON_URI
+  echo "Reusing icon CID via $TOKEN_ICON_URI"
 fi
 
 IMAGE_URI="$TOKEN_ICON_URI" CLUSTER="$CLUSTER" \

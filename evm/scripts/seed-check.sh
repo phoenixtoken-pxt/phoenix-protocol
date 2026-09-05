@@ -13,7 +13,7 @@ load_state
 
 [[ "$WIRED" = true ]] && ok "orchestrator.wired" || fail "orchestrator.wired=$WIRED"
 [[ "$LOCKED" = false ]] && ok "orchestrator.locked=false" || fail "already locked"
-owners_are_orchestrator
+owners_are_admin
 
 if [[ "$SEEDED" = true ]]; then
   ok "seedLiquidityAdded=true"

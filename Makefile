@@ -33,9 +33,11 @@ ANVIL_ACCOUNTS ?= 12
         status-anvil collect-fees-anvil execute-buyback-anvil demo-buyback-anvil \
         mint-musdc-anvil distribute-pxt-anvil fund-testers-anvil \
         fund-eth-anvil fund-all-eth-anvil \
-        launch-precheck launch launch-check \
+        launch-precheck create-token create-token-check launch launch-check \
+        deploy-pool-precheck deploy-pool deploy-pool-check \
         seed-precheck seed seed-check \
         lock-precheck lock lock-check \
+        set-wallet-statuses \
         check-funds verify open-trading \
         token-metadata deploy-token-icon deploy-token-metadata \
         web-deps web-dev web-env \
@@ -60,22 +62,26 @@ help:
 	@echo "  make fund-testers-anvil / distribute-pxt-anvil / web-dev"
 	@echo ""
 	@echo 'Live / local ceremony (CLUSTER selects evm/.env.$$(CLUSTER); default CLUSTER=arbitrum):'
-	@echo "  make launch-precheck                      RPC, wallets, unlock, funds"
-	@echo "  make launch                                TX1 wire (no LP)"
-	@echo "  make launch-check                           post-wire owners / no LP yet"
-	@echo "  make seed-precheck                        quote + orchestrator PXT for seed"
-	@echo "  make seed                                  TX2 seed LP"
+	@echo "  make create-token-precheck                RPC, wallets, unlock (alias: launch-precheck)"
+	@echo "  make create-token                          Phase 1: Pxt minted to admin"
+	@echo "  make create-token-check                    admin owns supply / phase TokenCreated"
+	@echo "  make deploy-pool                           Phase 2: hook + FeeCollector + init spot"
+	@echo "  make deploy-pool-check                     owners=admin, pool wired, no LP yet"
+	@echo "  make seed-precheck                        admin holds LP_SEED PXT+USDC"
+	@echo "  make seed                                  Phase 3: seed LP"
 	@echo "  make seed-check                             LP live, still unlocked"
 	@echo "  make lock-precheck                        RECIPIENT_APPROVER + BUYBACK_CALLERS"
-	@echo "  make lock                                  TX3 lock/renounce"
+	@echo "  make lock                                  Phase 4: lock/renounce"
 	@echo "  make lock-check                             Ownable 0, roles handed off"
+	@echo "  make set-wallet-statuses CLUSTER=base       Apply FEE_EXEMPT_WALLETS / NO_PENALTY_WALLETS (before lock)"
 	@echo "  make verify                                 Verify on the chain explorer (not anvil)"
 	@echo "  make open-trading                          After sell unlock: clear anti-bot + sell"
-	@echo "  make launch CLUSTER=anvil                   local fork + mUSDC"
-	@echo "  make launch CLUSTER=base                   evm/.env.base"
+	@echo "  make create-token CLUSTER=anvil            local fork + mUSDC"
+	@echo "  make create-token CLUSTER=base             evm/.env.base"
+	@echo "  make launch                                 Alias → create-token"
 	@echo "  See docs/DEPLOY_ARBITRUM.md"
 	@echo ""
-	@echo "Token metadata (after make launch; PINATA_JWT in evm/.env.secrets):"
+	@echo "Token metadata (after make create-token; PINATA_JWT in evm/.env.secrets):"
 	@echo "  make token-metadata CLUSTER=arbitrum"
 	@echo "  make deploy-token-metadata CLUSTER=arbitrum"
 	@echo "  See docs/TOKEN_METADATA.md"
@@ -130,18 +136,24 @@ anvil-base-sepolia-fork:
 
 BOOTSTRAP_LOG := /tmp/pxt-bootstrap-fork.log
 LAUNCH_LOG := /tmp/pxt-launch.log
+DEPLOY_POOL_LOG := /tmp/pxt-deploy-pool.log
 # CLUSTER selects evm/.env.$(CLUSTER). Anvil: CLUSTER=anvil (mUSDC). Live: arbitrum|base.
 CLUSTER ?= arbitrum
 LIVE_ENV := $(EVM_DIR)/.env.$(CLUSTER)
 ifeq ($(CLUSTER),anvil)
-LAUNCH_CONTRACT := script/PhoenixLauncherAnvil.s.sol:LaunchPhoenix
+CREATE_TOKEN_CONTRACT := script/PhoenixLauncherAnvil.s.sol:CreateTokenAnvil
+DEPLOY_POOL_CONTRACT := script/PhoenixLauncherAnvil.s.sol:DeployPoolAnvil
 LAUNCH_BROADCAST := --broadcast --force
 else
-LAUNCH_CONTRACT := script/PhoenixLaunch.s.sol:LaunchProtocol
-LAUNCH_BROADCAST := --broadcast --slow
+CREATE_TOKEN_CONTRACT := script/PhoenixLaunch.s.sol:CreateToken
+DEPLOY_POOL_CONTRACT := script/PhoenixLaunch.s.sol:DeployPool
+# Keep tx gas under EIP-7825 / Base RPC cap (2^24 = 16777216).
+LAUNCH_BROADCAST := --broadcast --slow --gas-estimate-multiplier 110
 endif
+# Back-compat aliases used by older recipes.
+LAUNCH_CONTRACT := $(CREATE_TOKEN_CONTRACT)
 
-# --- Live launch / seed / lock (chain-agnostic; CLUSTER=arbitrum|base|...) ---
+# --- Live create-token / deploy-pool / seed / lock (chain-agnostic; CLUSTER=arbitrum|base|...) ---
 check-funds:
 	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — copy evm/.env.$(CLUSTER).example" && exit 1)
 	@set -a && . $(LIVE_ENV) && set +a && \
@@ -153,10 +165,10 @@ check-funds:
 	if [ -n "$$QUOTE_TOKEN_ADDRESS" ]; then \
 	  echo -n "USDC: " && cast call $$QUOTE_TOKEN_ADDRESS "balanceOf(address)(uint256)" $$ADMIN_ADDRESS --rpc-url $$RPC; \
 	else \
-	echo "USDC: (no QUOTE_TOKEN_ADDRESS yet — run make launch CLUSTER=$(CLUSTER))"; \
+	echo "USDC: (no QUOTE_TOKEN_ADDRESS yet — set in env or after deploy-pool)"; \
 	fi
 
-launch-precheck:
+create-token-precheck launch-precheck:
 	@if [ "$(CLUSTER)" = anvil ] && [ ! -f $(LIVE_ENV) ]; then \
 	  test -f $(EVM_DIR)/.env.anvil.example || (echo "Missing $(EVM_DIR)/.env.anvil.example" && exit 1); \
 	  cp $(EVM_DIR)/.env.anvil.example $(LIVE_ENV); \
@@ -166,7 +178,7 @@ launch-precheck:
 	@chmod +x $(EVM_DIR)/scripts/launch-precheck.sh
 	@bash $(EVM_DIR)/scripts/launch-precheck.sh $(LIVE_ENV) $(CLUSTER)
 
-launch: evm-build
+create-token launch: evm-build
 	@if [ "$(CLUSTER)" = anvil ]; then \
 	  test -n "$$(curl -sf -X POST -H 'Content-Type: application/json' \
 	    --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
@@ -181,10 +193,12 @@ launch: evm-build
 	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — copy evm/.env.$(CLUSTER).example" && exit 1)
 	@chmod +x $(EVM_DIR)/scripts/write-launch-env.sh
 	@bash -eo pipefail -c '\
+	. $(EVM_DIR)/scripts/ceremony-lib.sh && \
+	if [ "$(CLUSTER)" != anvil ]; then ceremony_clear_inherited_cluster_env; fi; \
 	set -a && . $(LIVE_ENV) && set +a && \
 	if [ "$(CLUSTER)" = anvil ] && [ -f $(EVM_DIR)/.anvil-session.env ]; then set -a && . $(EVM_DIR)/.anvil-session.env && set +a; fi; \
-	. $(EVM_DIR)/scripts/ceremony-lib.sh && ceremony_unset_empty; \
-	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)  script=$(LAUNCH_CONTRACT)"; \
+	ceremony_unset_empty; \
+	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)  script=$(CREATE_TOKEN_CONTRACT)"; \
 	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing in $(LIVE_ENV)" && exit 1); \
 	RPC="$${RPC_URL:-$${ANVIL_RPC_URL:-$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-}}}}"; \
 	test -n "$$RPC" || (echo "RPC_URL missing in $(LIVE_ENV)" && exit 1); \
@@ -199,18 +213,58 @@ launch: evm-build
 	    echo "WARN: API key or FORK_CHAIN_ID unset — deploy without verify; run make verify CLUSTER=$(CLUSTER) later"; \
 	  fi; \
 	fi; \
-	( cd $(EVM_DIR) && forge script $(LAUNCH_CONTRACT) \
+	( cd $(EVM_DIR) && forge script $(CREATE_TOKEN_CONTRACT) \
 		--rpc-url $$RPC $(LAUNCH_BROADCAST) $$VERIFY_FLAGS -vvvv ) 2>&1 | tee $(LAUNCH_LOG) && \
 	bash $(EVM_DIR)/scripts/write-launch-env.sh $(LAUNCH_LOG) $(LIVE_ENV)'
-	@echo "Launch (wire) done. No LP yet. Next: make launch-check CLUSTER=$(CLUSTER) then make seed CLUSTER=$(CLUSTER). See $(LIVE_ENV)"
+	@echo "Phase 1 create-token done. Admin holds PXT. Next: make create-token-check CLUSTER=$(CLUSTER) then make deploy-pool CLUSTER=$(CLUSTER). See $(LIVE_ENV)"
 
-launch-check:
-	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make launch CLUSTER=$(CLUSTER) first" && exit 1)
-	@chmod +x $(EVM_DIR)/scripts/launch-check.sh
-	@bash $(EVM_DIR)/scripts/launch-check.sh $(LIVE_ENV) $(CLUSTER)
+create-token-check:
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make create-token CLUSTER=$(CLUSTER) first" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/create-token-check.sh
+	@bash $(EVM_DIR)/scripts/create-token-check.sh $(LIVE_ENV) $(CLUSTER)
+
+# Back-compat: old launch-check → create-token-check (pool may not exist yet).
+launch-check: create-token-check
+
+deploy-pool-precheck:
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make create-token CLUSTER=$(CLUSTER) first" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/create-token-check.sh
+	@bash $(EVM_DIR)/scripts/create-token-check.sh $(LIVE_ENV) $(CLUSTER)
+
+deploy-pool: evm-build
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/write-launch-env.sh
+	@bash -eo pipefail -c '\
+	. $(EVM_DIR)/scripts/ceremony-lib.sh && \
+	if [ "$(CLUSTER)" != anvil ]; then ceremony_clear_inherited_cluster_env; fi; \
+	set -a && . $(LIVE_ENV) && set +a && \
+	if [ "$(CLUSTER)" = anvil ] && [ -f $(EVM_DIR)/.anvil-session.env ]; then set -a && . $(EVM_DIR)/.anvil-session.env && set +a; fi; \
+	ceremony_unset_empty; \
+	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)  script=$(DEPLOY_POOL_CONTRACT)"; \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
+	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make create-token CLUSTER=$(CLUSTER)" && exit 1); \
+	RPC="$${RPC_URL:-$${ANVIL_RPC_URL:-$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-}}}}"; \
+	test -n "$$RPC" || (echo "RPC_URL missing" && exit 1); \
+	VERIFY_FLAGS=""; \
+	if [ "$(CLUSTER)" != anvil ]; then \
+	  API_KEY="$${ETHERSCAN_API_KEY:-$${ARBISCAN_API_KEY:-$${BASESCAN_API_KEY:-}}}"; \
+	  CHAIN="$${FORK_CHAIN_ID:-}"; \
+	  if [ -n "$$API_KEY" ] && [ -n "$$CHAIN" ]; then \
+	    VERIFY_FLAGS="--verify --etherscan-api-key $$API_KEY --verifier-url https://api.etherscan.io/v2/api?chainid=$$CHAIN"; \
+	  fi; \
+	fi; \
+	( cd $(EVM_DIR) && forge script $(DEPLOY_POOL_CONTRACT) \
+		--rpc-url $$RPC $(LAUNCH_BROADCAST) $$VERIFY_FLAGS -vvvv ) 2>&1 | tee $(DEPLOY_POOL_LOG) && \
+	bash $(EVM_DIR)/scripts/write-launch-env.sh $(DEPLOY_POOL_LOG) $(LIVE_ENV)'
+	@echo "Phase 2 deploy-pool done. Next: make deploy-pool-check CLUSTER=$(CLUSTER) then make seed CLUSTER=$(CLUSTER)"
+
+deploy-pool-check:
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
+	@chmod +x $(EVM_DIR)/scripts/ceremony-lib.sh $(EVM_DIR)/scripts/deploy-pool-check.sh
+	@bash $(EVM_DIR)/scripts/deploy-pool-check.sh $(LIVE_ENV) $(CLUSTER)
 
 seed-precheck:
-	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make launch CLUSTER=$(CLUSTER) first" && exit 1)
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make deploy-pool CLUSTER=$(CLUSTER) first" && exit 1)
 	@chmod +x $(EVM_DIR)/scripts/ceremony-lib.sh $(EVM_DIR)/scripts/seed-precheck.sh
 	@bash $(EVM_DIR)/scripts/seed-precheck.sh $(LIVE_ENV) $(CLUSTER)
 
@@ -221,7 +275,7 @@ seed: evm-build
 	. $(EVM_DIR)/scripts/ceremony-lib.sh && ceremony_unset_empty; \
 	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)"; \
 	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
-	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make launch CLUSTER=$(CLUSTER)" && exit 1); \
+	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make create-token CLUSTER=$(CLUSTER)" && exit 1); \
 	RPC="$${RPC_URL:-$${ANVIL_RPC_URL:-$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-}}}}"; \
 	test -n "$$RPC" || (echo "RPC_URL missing" && exit 1); \
 	cd $(EVM_DIR) && forge script script/PhoenixLaunch.s.sol:SeedProtocol \
@@ -245,7 +299,7 @@ lock: evm-build
 	. $(EVM_DIR)/scripts/ceremony-lib.sh && ceremony_unset_empty; \
 	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)"; \
 	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
-	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make launch CLUSTER=$(CLUSTER)" && exit 1); \
+	test -n "$$PHOENIX_ORCHESTRATOR" || (echo "PHOENIX_ORCHESTRATOR missing — run make create-token CLUSTER=$(CLUSTER)" && exit 1); \
 	if [ "$(CLUSTER)" = anvil ]; then \
 	  RECIPIENT_APPROVER="$${RECIPIENT_APPROVER:-$(ANVIL_RECIPIENT_APPROVER)}"; \
 	  BUYBACK_CALLERS="$${BUYBACK_CALLERS:-$(ANVIL_BUYBACK_CALLER)}"; \
@@ -263,6 +317,29 @@ lock-check:
 	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
 	@chmod +x $(EVM_DIR)/scripts/ceremony-lib.sh $(EVM_DIR)/scripts/lock-check.sh
 	@bash $(EVM_DIR)/scripts/lock-check.sh $(LIVE_ENV) $(CLUSTER)
+
+# Apply FEE_EXEMPT_WALLETS / NO_PENALTY_WALLETS from env (owner-only; before make lock).
+set-wallet-statuses: evm-build
+	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
+	@bash -eo pipefail -c '\
+	. $(EVM_DIR)/scripts/ceremony-lib.sh && \
+	if [ "$(CLUSTER)" != anvil ]; then ceremony_clear_inherited_cluster_env; fi; \
+	set -a && . $(LIVE_ENV) && set +a && \
+	if [ "$(CLUSTER)" = anvil ] && [ -f $(EVM_DIR)/.anvil-session.env ]; then set -a && . $(EVM_DIR)/.anvil-session.env && set +a; fi; \
+	ceremony_unset_empty; \
+	echo "CLUSTER=$(CLUSTER)  env=$(LIVE_ENV)"; \
+	test -n "$$PRIVATE_KEY" || (echo "PRIVATE_KEY missing" && exit 1); \
+	test -n "$$PXT_ADDRESS" || (echo "PXT_ADDRESS missing — run make create-token CLUSTER=$(CLUSTER)" && exit 1); \
+	test -n "$$FEE_EXEMPT_WALLETS$$NO_PENALTY_WALLETS$$NO_PENALTY_WALLET" || \
+	  (echo "Set FEE_EXEMPT_WALLETS and/or NO_PENALTY_WALLETS in $(LIVE_ENV)" && exit 1); \
+	RPC="$${RPC_URL:-$${ANVIL_RPC_URL:-$${ARBITRUM_RPC_URL:-$${BASE_RPC_URL:-}}}}"; \
+	test -n "$$RPC" || (echo "RPC_URL missing" && exit 1); \
+	echo "PXT=$$PXT_ADDRESS"; \
+	echo "FeeExempt count=$$(echo "$$FEE_EXEMPT_WALLETS" | tr "," "\n" | grep -c . || true)"; \
+	echo "NoPenalty count=$$(echo "$$NO_PENALTY_WALLETS" | tr "," "\n" | grep -c . || true)"; \
+	cd $(EVM_DIR) && forge script script/SetWalletStatuses.s.sol:SetWalletStatuses \
+		--rpc-url $$RPC --broadcast --slow -vvvv'
+	@echo "Wallet statuses applied. Verify with cast walletStatus before make lock CLUSTER=$(CLUSTER)"
 
 verify: evm-build
 	@if [ "$(CLUSTER)" = anvil ]; then echo "verify skipped on Anvil"; exit 0; fi
