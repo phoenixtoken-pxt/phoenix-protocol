@@ -44,14 +44,9 @@ contract PhoenixLauncher {
 
         bytes32 orchSalt = _orchSalt(owner, salt);
         address predicted = predictOrchestrator(owner, salt);
-        orchestrator = new PhoenixOrchestrator{salt: orchSalt}(
-            address(this),
-            owner,
-            pxtDeployer,
-            hookDeployer,
-            collectorDeployer,
-            openSellDeployer
-        );
+        orchestrator = new PhoenixOrchestrator{
+            salt: orchSalt
+        }(address(this), owner, pxtDeployer, hookDeployer, collectorDeployer, openSellDeployer);
         if (address(orchestrator) != predicted) revert OrchestratorMismatch();
         latestOrchestrator[owner] = address(orchestrator);
         emit Created(owner, address(orchestrator), salt);

@@ -56,9 +56,7 @@ contract PhoenixOrchestrator {
 
     event TokenCreated(address indexed pxt, address indexed owner, uint256 sellUnlock);
     event SeedAmountsSet(uint256 pxtSeed, uint256 usdcSeed);
-    event PoolContractsDeployed(
-        address indexed hook, address indexed collector, address openSell, address quoteToken
-    );
+    event PoolContractsDeployed(address indexed hook, address indexed collector, address openSell, address quoteToken);
     event PoolConfigured(uint160 sqrtPriceX96, int24 tickLower, int24 tickUpper);
     event Seeded(uint256 pxtAmount, uint256 usdcAmount);
     event Locked(address indexed recipientApprover);
@@ -148,9 +146,7 @@ contract PhoenixOrchestrator {
         Pxt token = pxt;
 
         h = PhoenixHookDeployer(hookDeployer).deploy(p.hookSalt, p.poolManager, token, operator, launchOwner);
-        fc = PhoenixCollectorDeployer(collectorDeployer).deploy(
-            p.poolManager, token, donation, marketing, launchOwner
-        );
+        fc = PhoenixCollectorDeployer(collectorDeployer).deploy(p.poolManager, token, donation, marketing, launchOwner);
         os = PhoenixOpenSellDeployer(openSellDeployer).deploy(token, PoolSwapTest(p.swapRouter), operator);
 
         hook = h;

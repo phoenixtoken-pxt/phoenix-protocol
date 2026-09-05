@@ -212,9 +212,7 @@ contract PhoenixLauncherTest is Test, PhoenixLaunchActions {
         PhoenixLaunchTypes.LaunchParams memory p = _poolParams(orch);
         vm.startPrank(client);
         (PhoenixV4ReturnDeltaHook h, PhoenixFeeCollector fc, PhoenixAntiBotOpenSell os) = orch.deployPoolContracts(p);
-        uint160 sqrtPrice = _configureAndInit(
-            p, orch.pxt(), h, fc, os, client, orch.tickLower(), orch.tickUpper()
-        );
+        uint160 sqrtPrice = _configureAndInit(p, orch.pxt(), h, fc, os, client, orch.tickLower(), orch.tickUpper());
         orch.markPoolConfigured(sqrtPrice);
         vm.stopPrank();
     }
