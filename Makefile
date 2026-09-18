@@ -65,6 +65,7 @@ help:
 	@echo "  make create-token-precheck                RPC, wallets, unlock (alias: launch-precheck)"
 	@echo "  make create-token                          Phase 1: Pxt minted to admin"
 	@echo "  make create-token-check                    admin owns supply / phase TokenCreated"
+	@echo "  make deploy-pool-precheck                  phase + LP_SEED ratio / TARGET_SPOT_PRICE"
 	@echo "  make deploy-pool                           Phase 2: hook + FeeCollector + init spot"
 	@echo "  make deploy-pool-check                     owners=admin, pool wired, no LP yet"
 	@echo "  make seed-precheck                        admin holds LP_SEED PXT+USDC"
@@ -228,8 +229,11 @@ launch-check: create-token-check
 
 deploy-pool-precheck:
 	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV) — run make create-token CLUSTER=$(CLUSTER) first" && exit 1)
-	@chmod +x $(EVM_DIR)/scripts/create-token-check.sh
-	@bash $(EVM_DIR)/scripts/create-token-check.sh $(LIVE_ENV) $(CLUSTER)
+	@chmod +x $(EVM_DIR)/scripts/ceremony-lib.sh $(EVM_DIR)/scripts/deploy-pool-precheck.sh
+	@bash -eo pipefail -c '\
+	. $(EVM_DIR)/scripts/ceremony-lib.sh && \
+	if [ "$(CLUSTER)" != anvil ]; then ceremony_clear_inherited_cluster_env; fi; \
+	bash $(EVM_DIR)/scripts/deploy-pool-precheck.sh $(LIVE_ENV) $(CLUSTER)'
 
 deploy-pool: evm-build
 	@test -f $(LIVE_ENV) || (echo "Missing $(LIVE_ENV)" && exit 1)
