@@ -1,0 +1,14 @@
+{
+  "name": "Phoenix Token",
+  "symbol": "PXT",
+  "description": "Phoenix Token (PXT) is the utility token of the Phoenix Project ecosystem - built for long-term community value through sustainable liquidity mechanisms, transparent fee flows (donations, marketing, burn, and buyback), and a model focused on real participation rather than short-term speculation.",
+  "decimals": 6,
+  "image": "https://ipfs.io/ipfs/QmXgdV3Jkn1r3hDF5voSyX2xykYTosvw2MLXJuGceCFvpo",
+  "external_url": "https://phoenixproject.community/",
+  "properties": {
+    "category": "fungible",
+    "contractName": "Pxt"
+  },
+  "address": "0xD0Ae953BE8E2E41406D3d5fE8b191441C2277B19",
+  "chainId": 8453
+}

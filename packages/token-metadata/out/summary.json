@@ -1,0 +1,8 @@
+{
+  "cluster": "base",
+  "chainId": 8453,
+  "address": "0xD0Ae953BE8E2E41406D3d5fE8b191441C2277B19",
+  "imageUri": "https://ipfs.io/ipfs/QmXgdV3Jkn1r3hDF5voSyX2xykYTosvw2MLXJuGceCFvpo",
+  "metadata": "/home/zeljko/workspaces/phoenixtoken.net/pxt-protocol/packages/token-metadata/out/metadata.json",
+  "tokenlist": "/home/zeljko/workspaces/phoenixtoken.net/pxt-protocol/packages/token-metadata/out/pxt.tokenlist.json"
+}
